@@ -39,21 +39,25 @@ bool   g_mouseRot = false;
 double g_lastX = 0.0, g_lastY = 0.0;
 
 // Shader programs
-GLuint g_program = 0;  // main lighting + shadow sampling
-GLuint g_depthProgram = 0;  // depth-only shadow pass
+GLuint g_program = 0; // main pass
+GLuint g_depthProgram = 0; // shadow-map depth pass
 
 // Shadow mapping globals
 GLuint g_shadowFBO = 0;
 GLuint g_shadowTex = 0;
 const int SHADOW_MAP_SIZE = 1024;
 
-// Directional light camera (from the spec)
+// Directional light camera (from spec)
 glm::vec3 g_lightEye = glm::vec3(-2.845f, 2.028f, -1.293f);
 glm::vec3 g_lightCenter = glm::vec3(0.542f, -0.141f, -0.422f);
 glm::vec3 g_lightUp = glm::vec3(0.0f, 1.0f, 0.0f);
 float     g_lightNear = 0.1f;
 float     g_lightFar = 10.0f;
 float     g_lightRange = 5.0f;  // ortho box half-size
+
+// Shadow strength + toggle (debug / tuning)
+float g_shadowStrength = 0.0f;  // 0 = fully black shadow, 1 = no shadow dimming
+bool  g_enableShadows = true;
 
 // Triceratops transform (editable in ImGui)
 glm::vec3 g_tricePos = glm::vec3(2.05f, 0.628725f, -1.9f);
@@ -62,9 +66,6 @@ float     g_triceYaw = 0.0f;   // degrees
 
 // First mesh index that belongs to triceratops
 size_t g_triceFirstMesh = (size_t)-1;
-
-
-float g_shadowStrength = 0.6f;
 
 // ==============================
 // Mesh struct
@@ -76,7 +77,7 @@ struct Mesh {
     GLsizei indexCount = 0;
 
     GLuint    diffuseTex = 0;             // map_Kd
-    glm::vec3 Ka = glm::vec3(0.2f);       // ambient
+    glm::vec3 Ka = glm::vec3(0.1f);       // ambient
     glm::vec3 Kd = glm::vec3(1.0f);       // diffuse
     glm::vec3 Ks = glm::vec3(0.0f);       // specular
     float     Ns = 32.0f;                 // shininess
@@ -85,11 +86,6 @@ struct Mesh {
 };
 
 std::vector<Mesh> g_meshes;
-
-// Directional light intensities (can be tweaked in ImGui)
-float g_IaIntensity = 0.1f;   // ambient
-float g_IdIntensity = 1.2f;   // diffuse
-float g_IsIntensity = 0.6f;   // specular
 
 // ==============================
 // GLFW error callback
@@ -144,14 +140,13 @@ static GLuint loadTexture2D(const std::string& path)
     glTexImage2D(GL_TEXTURE_2D, 0, internalFormat,
         w, h, 0, format, GL_UNSIGNED_BYTE, data);
 
-    // If grayscale: replicate R → G,B so it shows as gray, not pure red
+    // grayscale swizzle
     if (n == 1) {
         GLint swizzleMask[] = { GL_RED, GL_RED, GL_RED, GL_ONE };
         glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swizzleMask);
     }
 
     glGenerateMipmap(GL_TEXTURE_2D);
-
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
@@ -253,12 +248,12 @@ uniform mat4 u_lightVP;
 
 void main()
 {
-    vec4 wp = u_model * vec4(a_pos, 1.0);
-    v_pos  = wp.xyz;
-    v_norm = mat3(transpose(inverse(u_model))) * a_norm;
-    v_uv   = a_uv;
-
+    vec4 wp  = u_model * vec4(a_pos, 1.0);
+    v_pos    = wp.xyz;
+    v_norm   = mat3(transpose(inverse(u_model))) * a_norm;
+    v_uv     = a_uv;
     v_posLightSpace = u_lightVP * wp;
+
     gl_Position = u_proj * u_view * wp;
 }
 )";
@@ -273,8 +268,8 @@ out vec4 FragColor;
 
 uniform vec3 u_eye;
 
-// directional light parameters
-uniform vec3 u_lightDir;   // direction where light points (from light towards scene)
+// point light parameters (position but uses directional shadow map)
+uniform vec3 u_lightPos;
 uniform vec3 u_Ia;
 uniform vec3 u_Id;
 uniform vec3 u_Is;
@@ -291,22 +286,21 @@ uniform bool      u_useTex;
 
 // shadow map
 uniform sampler2D u_shadowMap;
-
-//shadowstrength
-uniform float u_shadowStrength; 
+uniform float     u_shadowStrength;
+uniform bool      u_enableShadows;
 
 void main()
 {
     vec3 N = normalize(v_norm);
-    vec3 L = normalize(-u_lightDir);   // light comes along -dir
-    vec3 V = normalize(u_eye - v_pos);
+    vec3 L = normalize(u_lightPos - v_pos);
+    vec3 V = normalize(u_eye      - v_pos);
     vec3 H = normalize(L + V);
 
     // diffuse color: from texture if present, otherwise Kd from MTL
     vec3 diffuseColor = u_Kd;
     if (u_useTex) {
         vec4 tex = texture(u_diffuseTex, v_uv);
-        // Alpha test: for leaves cutout
+        // Alpha test for leaves cutout, etc.
         if (tex.a < 0.5)
             discard;
         diffuseColor = tex.rgb;
@@ -315,55 +309,55 @@ void main()
     float NdotL = max(dot(N, L), 0.0);
     float NdotH = max(dot(N, H), 0.0);
 
+    // Blinn-Phong base shading
     vec3 ambient  = u_Ia * u_Ka;
     vec3 diffuse  = u_Id * diffuseColor * NdotL;
     vec3 specular = u_Is * u_Ks * pow(NdotH, u_Ns);
+    vec3 direct   = diffuse + specular;
 
     // === Shadow calculation ===
-    // perspective divide to go from clip space (light) to NDC
-    vec3 projCoords = v_posLightSpace.xyz / v_posLightSpace.w;
-    // NDC [-1,1] -> [0,1] texture space
-    projCoords = projCoords * 0.5 + 0.5;
-
     float shadow = 0.0;
 
-    // only sample if inside the light frustum
-    if (projCoords.x >= 0.0 && projCoords.x <= 1.0 &&
-        projCoords.y >= 0.0 && projCoords.y <= 1.0 &&
-        projCoords.z >= 0.0 && projCoords.z <= 1.0)
-    {
-        float currentDepth = projCoords.z;
+    if (u_enableShadows) {
+        // from clip space (light) to NDC
+        vec3 projCoords = v_posLightSpace.xyz / v_posLightSpace.w;
+        // NDC [-1,1] -> [0,1]
+        projCoords = projCoords * 0.5 + 0.5;
 
-        // bias to reduce shadow acne
-        float bias = max(0.001 * (1.0 - dot(N, L)), 0.0005);
+        // only sample if inside light frustum
+        if (projCoords.x >= 0.0 && projCoords.x <= 1.0 &&
+            projCoords.y >= 0.0 && projCoords.y <= 1.0 &&
+            projCoords.z >= 0.0 && projCoords.z <= 1.0)
+        {
+            float currentDepth = projCoords.z;
 
-        // 3x3 PCF
-        vec2 texelSize = 1.0 / vec2(textureSize(u_shadowMap, 0));
-        for (int x = -2; x <= 2; ++x) {
-            for (int y = -2; y <= 2; ++y) {
-                float closestDepth = texture(
-                    u_shadowMap,
-                    projCoords.xy + vec2(x, y) * texelSize
-                ).r;
+            // bias to reduce shadow acne
+            float bias = max(0.005 * (1.0 - dot(N, L)), 0.0005);
 
-                if (currentDepth - bias > closestDepth)
-                    shadow += 1.0;
+            // 3x3 PCF
+            vec2 texelSize = 1.0 / vec2(textureSize(u_shadowMap, 0));
+            for (int x = -1; x <= 1; ++x) {
+                for (int y = -1; y <= 1; ++y) {
+                    float closestDepth = texture(
+                        u_shadowMap,
+                        projCoords.xy + vec2(x, y) * texelSize
+                    ).r;
+                    if (currentDepth - bias > closestDepth)
+                        shadow += 1.0;
+                }
             }
+            shadow /= 9.0;
         }
-        shadow /= 25.0;
     }
 
-    // how dark the fully–shadowed area is (0 = black, 1 = no shadow)
-    float shadowStrength = u_shadowStrength;  // try 0.6–0.7
+    // how dark the fully–shadowed region is (0 = black, 1 = no dimming)
+    float s = clamp(u_shadowStrength, 0.0, 1.0);
 
-    vec3 direct = diffuse + specular;
-
-    // in shadow: keep some percentage of direct light
-    vec3 lighting = ambient + mix(direct * shadowStrength, direct, 1.0 - shadow);
+    // in shadow: keep only s * direct light
+    vec3 lighting = ambient + mix(direct * s, direct, 1.0 - shadow);
     FragColor = vec4(lighting, 1.0);
 }
 )";
-
 
 // Depth-only pass for shadow map
 static const char* kDepthVertexShader = R"(#version 410 core
@@ -461,8 +455,8 @@ static void loadOBJScene(const std::string& objPath, const glm::mat4& modelMatri
         if (!shape.mesh.material_ids.empty())
             matID = shape.mesh.material_ids[0];
 
-        std::vector<Vertex>       vertices;
-        std::vector<unsigned int> indices;
+        std::vector<Vertex>        vertices;
+        std::vector<unsigned int>  indices;
 
         vertices.reserve(shape.mesh.indices.size());
         indices.reserve(shape.mesh.indices.size());
@@ -510,9 +504,7 @@ static void loadOBJScene(const std::string& objPath, const glm::mat4& modelMatri
             indices.push_back(static_cast<unsigned int>(vertices.size() - 1));
         }
 
-        if (vertices.empty() || indices.empty()) {
-            continue;
-        }
+        if (vertices.empty() || indices.empty()) continue;
 
         Mesh mesh;
         mesh.model = modelMatrix;
@@ -628,14 +620,12 @@ static void renderShadowPass(const glm::mat4& lightVP)
 
     glm::mat4 triceModel = getTriceModel();
 
-    // Optional: reduce acne by rendering front faces for depth
-    glCullFace(GL_FRONT);
     glEnable(GL_CULL_FACE);
+    glCullFace(GL_FRONT); // helps reduce acne
 
     for (size_t i = 0; i < g_meshes.size(); ++i) {
         const Mesh& mesh = g_meshes[i];
-        if (mesh.vao == 0 || mesh.indexCount <= 0)
-            continue;
+        if (mesh.vao == 0 || mesh.indexCount <= 0) continue;
 
         bool isTrice = (g_triceFirstMesh != (size_t)-1 && i >= g_triceFirstMesh);
         glm::mat4 model = isTrice ? triceModel : mesh.model;
@@ -659,17 +649,15 @@ static void on_display(GLFWwindow* window)
     glfwGetFramebufferSize(window, &display_w, &display_h);
 
     float aspect = (display_h > 0) ? (float)display_w / (float)display_h : 1.0f;
-
     glm::mat4 proj = glm::perspective(glm::radians(g_fov), aspect, 0.1f, 100.0f);
     glm::mat4 view = glm::lookAt(g_eye, g_center, g_up);
 
-    // Light matrices
+    // Light matrices (directional)
     glm::mat4 lightView = glm::lookAt(g_lightEye, g_lightCenter, g_lightUp);
     glm::mat4 lightProj = glm::ortho(-g_lightRange, g_lightRange,
         -g_lightRange, g_lightRange,
         g_lightNear, g_lightFar);
     glm::mat4 lightVP = lightProj * lightView;
-    glm::vec3 lightDir = glm::normalize(g_lightCenter - g_lightEye);
 
     // 1) Shadow pass
     renderShadowPass(lightVP);
@@ -687,26 +675,26 @@ static void on_display(GLFWwindow* window)
 
     glUseProgram(g_program);
 
-    //shadow strength
-    glUniform1f(glGetUniformLocation(g_program, "u_shadowStrength"), g_shadowStrength);
-
-
     // Common uniforms
     glUniformMatrix4fv(glGetUniformLocation(g_program, "u_view"), 1, GL_FALSE, glm::value_ptr(view));
     glUniformMatrix4fv(glGetUniformLocation(g_program, "u_proj"), 1, GL_FALSE, glm::value_ptr(proj));
     glUniformMatrix4fv(glGetUniformLocation(g_program, "u_lightVP"), 1, GL_FALSE, glm::value_ptr(lightVP));
     glUniform3fv(glGetUniformLocation(g_program, "u_eye"), 1, glm::value_ptr(g_eye));
-    glUniform3fv(glGetUniformLocation(g_program, "u_lightDir"), 1, glm::value_ptr(lightDir));
 
-    // Light intensities
-    // Intensities controlled by ImGui
-    glm::vec3 Ia = glm::vec3(g_IaIntensity);
-    glm::vec3 Id = glm::vec3(g_IdIntensity);
-    glm::vec3 Is = glm::vec3(g_IsIntensity);
+    // Light parameters from assignment
+    glm::vec3 lightPos = g_lightEye;
+    glm::vec3 Ia(0.1f, 0.1f, 0.1f);
+    glm::vec3 Id(0.7f, 0.7f, 0.7f);
+    glm::vec3 Is(0.2f, 0.2f, 0.2f);
 
+    glUniform3fv(glGetUniformLocation(g_program, "u_lightPos"), 1, glm::value_ptr(lightPos));
     glUniform3fv(glGetUniformLocation(g_program, "u_Ia"), 1, glm::value_ptr(Ia));
     glUniform3fv(glGetUniformLocation(g_program, "u_Id"), 1, glm::value_ptr(Id));
     glUniform3fv(glGetUniformLocation(g_program, "u_Is"), 1, glm::value_ptr(Is));
+
+    // Shadow controls
+    glUniform1f(glGetUniformLocation(g_program, "u_shadowStrength"), g_shadowStrength);
+    glUniform1i(glGetUniformLocation(g_program, "u_enableShadows"), g_enableShadows ? 1 : 0);
 
     // Bind shadow map to texture unit 1
     glActiveTexture(GL_TEXTURE1);
@@ -717,19 +705,16 @@ static void on_display(GLFWwindow* window)
 
     for (size_t i = 0; i < g_meshes.size(); ++i) {
         const Mesh& mesh = g_meshes[i];
-
-        if (mesh.vao == 0 || mesh.indexCount <= 0)
-            continue; // safety
+        if (mesh.vao == 0 || mesh.indexCount <= 0) continue;
 
         bool isTrice = (g_triceFirstMesh != (size_t)-1 && i >= g_triceFirstMesh);
-
         glm::mat4 model = isTrice ? triceModel : mesh.model;
-        glBindVertexArray(mesh.vao);
 
+        glBindVertexArray(mesh.vao);
         glUniformMatrix4fv(glGetUniformLocation(g_program, "u_model"),
             1, GL_FALSE, glm::value_ptr(model));
 
-        // material (override for trice to make it pop)
+        // material (override for triceratops to make it stand out)
         glm::vec3 Ka = mesh.Ka;
         glm::vec3 Kd = mesh.Kd;
         glm::vec3 Ks = mesh.Ks;
@@ -738,7 +723,7 @@ static void on_display(GLFWwindow* window)
         bool useTex = (mesh.diffuseTex != 0);
 
         if (isTrice) {
-            Ka = glm::vec3(0.05f, 0.05f, 0.05f);
+            Ka = glm::vec3(0.05f);
             Kd = glm::vec3(0.2f, 0.9f, 0.2f);
             Ks = glm::vec3(1.0f);
             Ns = 64.0f;
@@ -789,17 +774,11 @@ static void on_gui()
     ImGui::DragFloat3("Light Center", glm::value_ptr(g_lightCenter), 0.05f);
     ImGui::SliderFloat("Light Range", &g_lightRange, 1.0f, 10.0f);
 
+    ImGui::Checkbox("Enable Shadows", &g_enableShadows);
+    ImGui::SliderFloat("Shadow Strength", &g_shadowStrength, 0.0f, 1.0f);
+
     ImGui::Separator();
     ImGui::ColorEdit3("Clear color", (float*)&g_clearColor);
-
-    ImGui::Separator();
-    ImGui::Text("Directional Light");
-
-    ImGui::SliderFloat("Ambient Ia", &g_IaIntensity, 0.0f, 2.0f);
-    ImGui::SliderFloat("Diffuse Id", &g_IdIntensity, 0.0f, 3.0f);
-    ImGui::SliderFloat("Specular Is", &g_IsIntensity, 0.0f, 3.0f);
-
-    ImGui::SliderFloat("Shadow Strength", &g_shadowStrength, 0.0f, 1.0f);
 
     ImGui::Separator();
     ImGui::Text("Controls:");
@@ -944,9 +923,7 @@ int main(int, char**)
 
     // Load models
     loadOBJScene("./assets/indoor_model/Grey_White_Room.obj", glm::mat4(1.0f));
-
-    // Record where triceratops meshes will begin
-    g_triceFirstMesh = g_meshes.size();
+    g_triceFirstMesh = g_meshes.size(); // triceratops starts here
     loadOBJScene("./assets/indoor_model/trice.obj", glm::mat4(1.0f));
 
     // Main loop
@@ -979,11 +956,10 @@ int main(int, char**)
         if (m.vao)        glDeleteVertexArrays(1, &m.vao);
     }
 
-    if (g_shadowTex) glDeleteTextures(1, &g_shadowTex);
-    if (g_shadowFBO) glDeleteFramebuffers(1, &g_shadowFBO);
-
-    if (g_depthProgram) glDeleteProgram(g_depthProgram);
-    if (g_program)      glDeleteProgram(g_program);
+    if (g_shadowTex)      glDeleteTextures(1, &g_shadowTex);
+    if (g_shadowFBO)      glDeleteFramebuffers(1, &g_shadowFBO);
+    if (g_depthProgram)   glDeleteProgram(g_depthProgram);
+    if (g_program)        glDeleteProgram(g_program);
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
