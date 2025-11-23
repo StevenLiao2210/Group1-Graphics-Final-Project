@@ -86,6 +86,10 @@ int g_viewMode = 0;
 GLuint g_quadVAO = 0;
 GLuint g_quadVBO = 0;
 
+//Normal Mapping
+bool   g_enableNormalMap = true;
+GLuint g_triceNormalTex = 0;
+
 // ==============================
 // Mesh struct
 // ==============================
@@ -293,6 +297,9 @@ uniform float u_Ns;
 uniform sampler2D u_diffuseTex;
 uniform bool      u_useTex;
 
+uniform sampler2D u_normalMap;
+uniform bool      u_useNormalMap;
+
 void main()
 {
     vec3 Ka = u_Ka;
@@ -300,18 +307,39 @@ void main()
     if (u_useTex) {
         vec4 tex = texture(u_diffuseTex, v_uv);
         if (tex.a < 0.5)
-            discard; // alpha cutout, e.g. plant leaves
-        Kd = tex.rgb;
-        Ka = u_Ka * tex.rgb;
+            discard; // alpha cutout, e.g., plant
+        Kd = tex.rgb;          // only diffuse comes from texture
+        // Ka stays as material ambient u_Ka
+    }
+
+    // Base world-space normal
+    vec3 N = normalize(v_worldNorm);
+
+    // --- Normal mapping (Trice only when enabled) ---
+    if (u_useNormalMap) {
+        // Build TBN in world space using derivatives
+        vec3 dp1  = dFdx(v_worldPos);
+        vec3 dp2  = dFdy(v_worldPos);
+        vec2 duv1 = dFdx(v_uv);
+        vec2 duv2 = dFdy(v_uv);
+
+        float r = 1.0 / (duv1.x * duv2.y - duv1.y * duv2.x);
+        vec3 T = normalize((dp1 * duv2.y - dp2 * duv1.y) * r);
+        vec3 B = normalize((dp2 * duv1.x - dp1 * duv2.x) * r);
+
+        vec3 nTex = texture(u_normalMap, v_uv).xyz * 2.0 - 1.0; // tangent-space
+        mat3 TBN  = mat3(T, B, N);
+        N = normalize(TBN * nTex);  // perturbed world-space normal
     }
 
     gPosition = vec4(v_worldPos, 1.0);
-    gNormal   = vec4(normalize(v_worldNorm), 0.0);
-    gAmbient  = vec4(Ka, 1.0);
+    gNormal   = vec4(N, 0.0);
+    gAmbient  = vec4(Ka, 1.0);   // now pure material ambient
     gDiffuse  = vec4(Kd, 1.0);
     gSpecular = vec4(u_Ks, u_Ns);
 }
 )";
+
 
 // Lighting pass: fullscreen quad using G-buffers + shadow map
 static const char* kLightVertexShader = R"(#version 410 core
@@ -904,6 +932,22 @@ static void on_display(GLFWwindow* window)
         bool isTrice = (g_triceFirstMesh != (size_t)-1 && i >= g_triceFirstMesh);
         glm::mat4 model = isTrice ? triceModel : mesh.model;
 
+        // For trice: enable normal map if checkbox is on and texture is valid
+        bool useNormalMap = isTrice && g_enableNormalMap && (g_triceNormalTex != 0);
+        glUniform1i(glGetUniformLocation(g_geomProgram, "u_useNormalMap"),
+            useNormalMap ? 1 : 0);
+
+        if (useNormalMap) {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, g_triceNormalTex);
+            glUniform1i(glGetUniformLocation(g_geomProgram, "u_normalMap"), 1);
+        }
+        else {
+            // No normal map for this mesh
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
         glBindVertexArray(mesh.vao);
         glUniformMatrix4fv(glGetUniformLocation(g_geomProgram, "u_model"), 1, GL_FALSE, glm::value_ptr(model));
 
@@ -914,10 +958,7 @@ static void on_display(GLFWwindow* window)
         bool      useTex = (mesh.diffuseTex != 0);
 
         if (isTrice) {
-            Ka = glm::vec3(0.05f);
             Kd = glm::vec3(0.2f, 0.9f, 0.2f);
-            Ks = glm::vec3(1.0f);
-            Ns = 64.0f;
             useTex = false; // keep solid green dino in deferred too
         }
 
@@ -1020,6 +1061,7 @@ static void on_gui()
     ImGui::DragFloat("Trice Scale", &g_triceScale,
         0.0001f, 0.00001f, 0.01f, "%.5f");
     ImGui::SliderFloat("Trice Yaw", &g_triceYaw, -180.0f, 180.0f);
+    ImGui::Checkbox("Normal map (Trice)", &g_enableNormalMap);
 
     ImGui::Separator();
     ImGui::Text("Directional Light");
@@ -1198,6 +1240,8 @@ int main(int, char**)
     g_triceFirstMesh = g_meshes.size(); // triceratops starts here
     loadOBJScene("./assets/indoor_model/trice.obj", glm::mat4(1.0f));
 
+    g_triceNormalTex = loadTexture2D("./assets/indoor_model/tricnorm.jpg");
+
     // Main loop
     while (!glfwWindowShouldClose(window))
     {
@@ -1245,6 +1289,9 @@ int main(int, char**)
 
     if (g_quadVBO)      glDeleteBuffers(1, &g_quadVBO);
     if (g_quadVAO)      glDeleteVertexArrays(1, &g_quadVAO);
+
+    if (g_triceNormalTex) glDeleteTextures(1, &g_triceNormalTex);
+
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
