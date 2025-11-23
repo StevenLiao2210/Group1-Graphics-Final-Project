@@ -42,6 +42,8 @@ double g_lastX = 0.0, g_lastY = 0.0;
 GLuint g_geomProgram = 0; // geometry (G-buffer) pass
 GLuint g_lightProgram = 0; // lighting pass
 GLuint g_depthProgram = 0; // shadow-map depth pass
+GLuint g_blurProgram = 0; // gaussian blur for bloom
+GLuint g_finalProgram = 0; // final combine pass
 
 // Shadow mapping globals
 GLuint g_shadowFBO = 0;
@@ -49,12 +51,19 @@ GLuint g_shadowTex = 0;
 const int SHADOW_MAP_SIZE = 1024;
 
 // Directional light camera (from spec)
-glm::vec3 g_lightEye = glm::vec3(-2.845f, 2.028f, -1.293f);
-glm::vec3 g_lightCenter = glm::vec3(0.542f, -0.141f, -0.422f);
+glm::vec3 g_lightEye = glm::vec3(1.87659f, 0.4625f, 0.103928f);
+glm::vec3 g_lightCenter = glm::vec3(0.0f, 0.5f, 0.0f);
 glm::vec3 g_lightUp = glm::vec3(0.0f, 1.0f, 0.0f);
 float     g_lightNear = 0.1f;
 float     g_lightFar = 10.0f;
 float     g_lightRange = 5.0f;  // ortho box half-size
+
+GLuint g_lightSphereVAO = 0;
+GLuint g_lightSphereVBO = 0;
+GLuint g_lightSphereEBO = 0;
+GLsizei g_lightSphereIndexCount = 0;
+
+const float g_lightSphereRadius = 0.22f;  // from assignment
 
 // Shadow strength + toggle (debug / tuning)
 float g_shadowStrength = 0.0f;  // 0 = fully black shadow, 1 = no shadow dimming
@@ -89,6 +98,20 @@ GLuint g_quadVBO = 0;
 //Normal Mapping
 bool   g_enableNormalMap = true;
 GLuint g_triceNormalTex = 0;
+
+GLuint g_hdrFBO = 0;
+GLuint g_hdrColorTex = 0;
+GLuint g_brightColorTex = 0;
+GLuint g_pingpongFBO[2] = { 0, 0 };
+GLuint g_pingpongTex[2] = { 0, 0 };
+int    g_bloomWidth = 0;
+int    g_bloomHeight = 0;
+
+bool   g_enableBloom = true;
+float  g_bloomThreshold = 1.2f;
+float  g_bloomIntensity = 0.8f;
+float  g_exposure = 1.5f;
+int    g_blurIterations = 10;
 
 // ==============================
 // Mesh struct
@@ -357,7 +380,10 @@ void main()
 
 static const char* kLightFragmentShader = R"(#version 410 core
 in vec2 v_uv;
-out vec4 FragColor;
+
+// 0 = final lighting (HDR color), 1 = bright parts for bloom
+layout(location = 0) out vec4 FragColor;
+layout(location = 1) out vec4 BrightColor;
 
 // G-buffers
 uniform sampler2D gPosition;
@@ -373,11 +399,20 @@ uniform vec3 u_Ia;
 uniform vec3 u_Id;
 uniform vec3 u_Is;
 
+// Point light attenuation (constant, linear, quadratic)
+uniform float u_attConst;
+uniform float u_attLinear;
+uniform float u_attQuadratic;
+
 // Shadow map (+ light matrix)
 uniform sampler2D u_shadowMap;
 uniform mat4  u_lightVP;
 uniform float u_shadowStrength;
 uniform bool  u_enableShadows;
+
+// Bloom
+uniform bool  u_enableBloom;
+uniform float u_bloomThreshold;
 
 // Debug view mode:
 // 0 = lighting, 1 = pos, 2 = normal, 3 = ambient,
@@ -392,43 +427,71 @@ void main()
     vec3 Kd       = texture(gDiffuse,  v_uv).rgb;
     vec4 specData = texture(gSpecular, v_uv);
     vec3 Ks       = specData.rgb;
-    float Ns      = max(specData.a, 1.0);
+    float NsRaw = specData.a;
+    bool isEmissive = (NsRaw < 0.0);
+    float Ns = max(NsRaw, 1.0);
 
     // Skip pixels with no geometry
     if (pos == vec3(0.0)) {
-        FragColor = vec4(0.0);
+        FragColor   = vec4(0.0);
+        BrightColor = vec4(0.0);
         return;
     }
 
-    // ---------- DEBUG VIEWS ----------
+    // ---------- DEBUG VIEWS (no bloom) ----------
     if (u_viewMode == 1) {
-        // world position, normalized for display
         vec3 p = normalize(pos) * 0.5 + 0.5;
-        FragColor = vec4(p, 1.0);
+        FragColor   = vec4(p, 1.0);
+        BrightColor = vec4(0.0);
         return;
     }
     if (u_viewMode == 2) {
-        // world normal, normalized for display
         vec3 n = normalize(normal) * 0.5 + 0.5;
-        FragColor = vec4(n, 1.0);
+        FragColor   = vec4(n, 1.0);
+        BrightColor = vec4(0.0);
         return;
     }
     if (u_viewMode == 3) {
-        // ambient color map
-        FragColor = vec4(Ka, 1.0);
+        FragColor   = vec4(Ka, 1.0);
+        BrightColor = vec4(0.0);
         return;
     }
     if (u_viewMode == 4) {
-        // diffuse color map
-        FragColor = vec4(Kd, 1.0);
+        FragColor   = vec4(Kd, 1.0);
+        BrightColor = vec4(0.0);
         return;
     }
     if (u_viewMode == 5) {
-        // specular color map (just show Ks.rgb)
-        FragColor = vec4(Ks, 1.0);
+        FragColor   = vec4(Ks, 1.0);
+        BrightColor = vec4(0.0);
         return;
     }
     // ---------- END DEBUG VIEWS ----------
+
+        if (pos == vec3(0.0)) {
+            FragColor   = vec4(0.0);
+            BrightColor = vec4(0.0);
+            return;
+        }
+
+     // Emissive objects: encoded by negative shininess (NsRaw < 0.0)
+        if (isEmissive) {
+            vec3 emissive = Kd; // you set Kd = vec3(10.0) on the C++ side
+
+            // Base color is just emissive, no attenuation, no shadows
+            FragColor = vec4(emissive, 1.0);
+
+            // Send directly to bloom using the same threshold logic
+            vec3 bright = vec3(0.0);
+            if (u_enableBloom) {
+                float brightness = max(max(emissive.r, emissive.g), emissive.b);
+                if (brightness > u_bloomThreshold)
+                    bright = emissive;
+            }
+            BrightColor = vec4(bright, 1.0);
+            return;
+        }
+
 
     // Normal lighting path
     vec3 N = normalize(normal);
@@ -443,6 +506,14 @@ void main()
     vec3 diffuse  = u_Id * Kd * NdotL;
     vec3 specular = (NdotL > 0.0) ? (u_Is * Ks * pow(NdotH, Ns)) : vec3(0.0);
     vec3 direct   = diffuse + specular;
+
+    // ---- point light attenuation ----
+    float dist = length(u_lightPos - pos);
+    float attenuation = 1.0 /
+        (u_attConst + u_attLinear * dist + u_attQuadratic * dist * dist);
+
+    // only direct light is attenuated; ambient stays as room fill
+    direct *= attenuation;
 
     // Shadow computation
     float shadow = 0.0;
@@ -475,9 +546,73 @@ void main()
 
     float s = clamp(u_shadowStrength, 0.0, 1.0);
     vec3 lighting = ambient + mix(direct * s, direct, 1.0 - shadow);
-    FragColor = vec4(lighting, 1.0);
+
+    // Bloom bright-pass: keep only pixels above threshold
+    vec3 bright = vec3(0.0);
+    if (u_enableBloom) {
+        float brightness = max(max(lighting.r, lighting.g), lighting.b);
+        if (brightness > u_bloomThreshold)
+            bright = lighting;
+    }
+
+    FragColor   = vec4(lighting, 1.0);   // HDR scene color
+    BrightColor = vec4(bright, 1.0);     // bright parts for bloom
 }
 )";
+
+// Gaussian blur for bloom (ping-pong)
+static const char* kBlurFragmentShader = R"(#version 410 core
+in vec2 v_uv;
+out vec4 FragColor;
+
+uniform sampler2D u_image;
+uniform bool      u_horizontal;
+
+void main()
+{
+    float weight[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+    vec2 texelSize = 1.0 / vec2(textureSize(u_image, 0));
+
+    vec3 result = texture(u_image, v_uv).rgb * weight[0];
+    for (int i = 1; i < 5; ++i) {
+        vec2 offset = u_horizontal
+            ? vec2(texelSize.x * float(i), 0.0)
+            : vec2(0.0, texelSize.y * float(i));
+
+        result += texture(u_image, v_uv + offset).rgb * weight[i];
+        result += texture(u_image, v_uv - offset).rgb * weight[i];
+    }
+    FragColor = vec4(result, 1.0);
+}
+)";
+
+// Final combine: HDR scene + blurred bloom, tone mapping & gamma
+static const char* kFinalFragmentShader = R"(#version 410 core
+in vec2 v_uv;
+out vec4 FragColor;
+
+uniform sampler2D u_scene;
+uniform sampler2D u_bloomBlur;
+uniform bool  u_enableBloom;
+uniform float u_bloomIntensity;
+uniform float u_exposure;
+
+void main()
+{
+    vec3 hdrColor   = texture(u_scene,     v_uv).rgb;
+    vec3 bloomColor = texture(u_bloomBlur, v_uv).rgb;
+
+    if (u_enableBloom) {
+        hdrColor += bloomColor * u_bloomIntensity;
+    }
+
+    // simple exponential tone mapping
+    vec3 mapped = vec3(1.0) - exp(-hdrColor * u_exposure);
+    // gamma correction
+    FragColor = vec4(mapped, 1.0);
+}
+)";
+
 
 
 // Depth-only pass for shadow map
@@ -711,6 +846,78 @@ static void initShadowMap()
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+static void initBloomBuffers(int width, int height)
+{
+    if (width <= 0 || height <= 0) return;
+    if (width == g_bloomWidth && height == g_bloomHeight) return;
+
+    g_bloomWidth = width;
+    g_bloomHeight = height;
+
+    // Delete old
+    if (g_hdrColorTex)   glDeleteTextures(1, &g_hdrColorTex);
+    if (g_brightColorTex) glDeleteTextures(1, &g_brightColorTex);
+    if (g_hdrFBO)        glDeleteFramebuffers(1, &g_hdrFBO);
+    glDeleteTextures(2, g_pingpongTex);
+    glDeleteFramebuffers(2, g_pingpongFBO);
+
+    // HDR FBO (scene + bright)
+    glGenFramebuffers(1, &g_hdrFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_hdrFBO);
+
+    // Scene color (HDR)
+    glGenTextures(1, &g_hdrColorTex);
+    glBindTexture(GL_TEXTURE_2D, g_hdrColorTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
+        GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+        GL_TEXTURE_2D, g_hdrColorTex, 0);
+
+    // Bright color (HDR)
+    glGenTextures(1, &g_brightColorTex);
+    glBindTexture(GL_TEXTURE_2D, g_brightColorTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
+        GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+        GL_TEXTURE_2D, g_brightColorTex, 0);
+
+    GLenum attachments[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+    glDrawBuffers(2, attachments);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        std::cerr << "ERROR: HDR FBO not complete!\n";
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // Ping-pong FBOs for blur
+    glGenFramebuffers(2, g_pingpongFBO);
+    glGenTextures(2, g_pingpongTex);
+    for (int i = 0; i < 2; ++i) {
+        glBindFramebuffer(GL_FRAMEBUFFER, g_pingpongFBO[i]);
+        glBindTexture(GL_TEXTURE_2D, g_pingpongTex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
+            GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+            GL_TEXTURE_2D, g_pingpongTex[i], 0);
+
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            std::cerr << "ERROR: Ping-pong FBO " << i << " not complete!\n";
+        }
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+
 // ==============================
 // G-buffer init / resize
 // ==============================
@@ -804,6 +1011,7 @@ static void initGBuffer(int width, int height)
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    initBloomBuffers(width, height);
 }
 
 // ==============================
@@ -835,6 +1043,81 @@ static void initFullscreenQuad()
 
     glBindVertexArray(0);
 }
+
+static void initLightSphere()
+{
+    if (g_lightSphereVAO != 0) return;
+
+    const int stacks = 16;
+    const int slices = 32;
+
+    struct V {
+        glm::vec3 pos;
+        glm::vec3 norm;
+        glm::vec2 uv;
+    };
+
+    std::vector<V> verts;
+    std::vector<unsigned> idx;
+
+    for (int i = 0; i <= stacks; i++) {
+        float v = float(i) / stacks;
+        float theta = v * 3.1415926f;
+
+        for (int j = 0; j <= slices; j++) {
+            float u = float(j) / slices;
+            float phi = u * 6.2831853f;
+
+            glm::vec3 n(
+                sin(theta) * cos(phi),
+                cos(theta),
+                sin(theta) * sin(phi));
+
+            verts.push_back({ n, n, glm::vec2(u, v) });
+        }
+    }
+
+    for (int i = 0; i < stacks; i++) {
+        for (int j = 0; j < slices; j++) {
+            int row1 = i * (slices + 1);
+            int row2 = (i + 1) * (slices + 1);
+
+            idx.push_back(row1 + j);
+            idx.push_back(row2 + j);
+            idx.push_back(row2 + j + 1);
+
+            idx.push_back(row1 + j);
+            idx.push_back(row2 + j + 1);
+            idx.push_back(row1 + j + 1);
+        }
+    }
+
+    g_lightSphereIndexCount = idx.size();
+
+    glGenVertexArrays(1, &g_lightSphereVAO);
+    glGenBuffers(1, &g_lightSphereVBO);
+    glGenBuffers(1, &g_lightSphereEBO);
+
+    glBindVertexArray(g_lightSphereVAO);
+
+    glBindBuffer(GL_ARRAY_BUFFER, g_lightSphereVBO);
+    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(V), verts.data(), GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_lightSphereEBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size() * sizeof(unsigned), idx.data(), GL_STATIC_DRAW);
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(V), (void*)0);
+
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(V), (void*)offsetof(V, norm));
+
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(V), (void*)offsetof(V, uv));
+
+    glBindVertexArray(0);
+}
+
 
 // Helper to get current trice model matrix
 static glm::mat4 getTriceModel()
@@ -977,17 +1260,43 @@ static void on_display(GLFWwindow* window)
         glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, 0);
     }
 
+    // ---- Emissive Point Light Sphere ----
+    if (g_lightSphereVAO != 0)
+    {
+        glm::mat4 model(1.0f);
+        model = glm::translate(model, g_lightEye);     // same position as point light
+        model = glm::scale(model, glm::vec3(g_lightSphereRadius));
+
+        glBindVertexArray(g_lightSphereVAO);
+
+        glUniformMatrix4fv(glGetUniformLocation(g_geomProgram, "u_model"),
+            1, GL_FALSE, glm::value_ptr(model));
+
+        // emissive color stored in Kd
+        glm::vec3 Kd = glm::vec3(20.0f);  // bright white so bloom works
+        glm::vec3 Ka = glm::vec3(0.0f);
+        glm::vec3 Ks = glm::vec3(0.0f);
+        float Ns = -1.0f;    // <---- negative shininess marks emissive
+
+        glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Ka"), 1, glm::value_ptr(Ka));
+        glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Kd"), 1, glm::value_ptr(Kd));
+        glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Ks"), 1, glm::value_ptr(Ks));
+        glUniform1f(glGetUniformLocation(g_geomProgram, "u_Ns"), Ns);
+
+        glUniform1i(glGetUniformLocation(g_geomProgram, "u_useTex"), 0);
+        glUniform1i(glGetUniformLocation(g_geomProgram, "u_useNormalMap"), 0);
+
+        glDrawElements(GL_TRIANGLES, g_lightSphereIndexCount, GL_UNSIGNED_INT, 0);
+    }
+
+
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    // 3) Lighting pass -> default framebuffer
+    // 3) Lighting pass -> HDR FBO (scene + bright)
+    glBindFramebuffer(GL_FRAMEBUFFER, g_hdrFBO);
     glViewport(0, 0, display_w, display_h);
     glDisable(GL_DEPTH_TEST);
-
-    glClearColor(g_clearColor.x * g_clearColor.w,
-        g_clearColor.y * g_clearColor.w,
-        g_clearColor.z * g_clearColor.w,
-        g_clearColor.w);
     glClear(GL_COLOR_BUFFER_BIT);
 
     glUseProgram(g_lightProgram);
@@ -1021,20 +1330,80 @@ static void on_display(GLFWwindow* window)
     // Camera / light uniforms
     glUniform3fv(glGetUniformLocation(g_lightProgram, "u_eye"), 1, glm::value_ptr(g_eye));
 
-    glm::vec3 lightPos = g_lightEye;
-    glm::vec3 Ia(0.1f, 0.1f, 0.1f);
-    glm::vec3 Id(0.7f, 0.7f, 0.7f);
-    glm::vec3 Is(0.2f, 0.2f, 0.2f);
+    glm::vec3 lightPos = g_lightEye;  // same world-space position as before
+    glm::vec3 Ia(0.03f, 0.03f, 0.03f);
+    glm::vec3 Id(0.9f, 0.9f, 0.9f);
+    glm::vec3 Is(0.3f, 0.3f, 0.3f);
 
     glUniform3fv(glGetUniformLocation(g_lightProgram, "u_lightPos"), 1, glm::value_ptr(lightPos));
     glUniform3fv(glGetUniformLocation(g_lightProgram, "u_Ia"), 1, glm::value_ptr(Ia));
     glUniform3fv(glGetUniformLocation(g_lightProgram, "u_Id"), 1, glm::value_ptr(Id));
     glUniform3fv(glGetUniformLocation(g_lightProgram, "u_Is"), 1, glm::value_ptr(Is));
 
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_attConst"), 1.0f);
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_attLinear"), 0.7f);
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_attQuadratic"), 0.14f);
+
     glUniformMatrix4fv(glGetUniformLocation(g_lightProgram, "u_lightVP"), 1, GL_FALSE, glm::value_ptr(lightVP));
     glUniform1f(glGetUniformLocation(g_lightProgram, "u_shadowStrength"), g_shadowStrength);
     glUniform1i(glGetUniformLocation(g_lightProgram, "u_enableShadows"), g_enableShadows ? 1 : 0);
     glUniform1i(glGetUniformLocation(g_lightProgram, "u_viewMode"), g_viewMode);
+
+    glUniform1i(glGetUniformLocation(g_lightProgram, "u_enableBloom"), g_enableBloom ? 1 : 0);
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_bloomThreshold"), g_bloomThreshold);
+
+    glBindVertexArray(g_quadVAO);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+
+    // 4) Blur bright texture (gaussian ping-pong)
+    bool horizontal = true;
+    bool firstIter = true;
+    int  iterations = glm::clamp(g_blurIterations, 1, 20);
+
+    glUseProgram(g_blurProgram);
+    for (int i = 0; i < iterations; ++i) {
+        glBindFramebuffer(GL_FRAMEBUFFER, g_pingpongFBO[horizontal ? 1 : 0]);
+        glUniform1i(glGetUniformLocation(g_blurProgram, "u_horizontal"), horizontal ? 1 : 0);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D,
+            firstIter ? g_brightColorTex
+            : g_pingpongTex[horizontal ? 0 : 1]);
+        glUniform1i(glGetUniformLocation(g_blurProgram, "u_image"), 0);
+
+        glBindVertexArray(g_quadVAO);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+        horizontal = !horizontal;
+        if (firstIter) firstIter = false;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // 5) Final combine: HDR scene + blurred bloom -> default framebuffer
+    glViewport(0, 0, display_w, display_h);
+
+    glClearColor(g_clearColor.x* g_clearColor.w,
+        g_clearColor.y* g_clearColor.w,
+        g_clearColor.z* g_clearColor.w,
+        g_clearColor.w);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(g_finalProgram);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_hdrColorTex);
+    glUniform1i(glGetUniformLocation(g_finalProgram, "u_scene"), 0);
+
+    GLuint blurredTex = g_pingpongTex[horizontal ? 0 : 1];
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, blurredTex);
+    glUniform1i(glGetUniformLocation(g_finalProgram, "u_bloomBlur"), 1);
+
+    glUniform1i(glGetUniformLocation(g_finalProgram, "u_enableBloom"), g_enableBloom ? 1 : 0);
+    glUniform1f(glGetUniformLocation(g_finalProgram, "u_bloomIntensity"), g_bloomIntensity);
+    glUniform1f(glGetUniformLocation(g_finalProgram, "u_exposure"), g_exposure);
 
     glBindVertexArray(g_quadVAO);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -1071,6 +1440,14 @@ static void on_gui()
 
     ImGui::Checkbox("Enable Shadows", &g_enableShadows);
     ImGui::SliderFloat("Shadow Strength", &g_shadowStrength, 0.0f, 1.0f);
+
+    ImGui::Separator();
+    ImGui::Text("Bloom / HDR");
+    ImGui::Checkbox("Enable Bloom", &g_enableBloom);
+    ImGui::SliderFloat("Bloom Threshold", &g_bloomThreshold, 0.1f, 5.0f);
+    ImGui::SliderFloat("Bloom Intensity", &g_bloomIntensity, 0.0f, 3.0f);
+    ImGui::SliderInt("Blur Iterations", &g_blurIterations, 1, 20);
+    ImGui::SliderFloat("Exposure", &g_exposure, 0.1f, 5.0f);
 
     ImGui::Separator();
     ImGui::Text("G-Buffer Debug");
@@ -1227,9 +1604,12 @@ int main(int, char**)
     // Our GL resources
     g_geomProgram = createProgram(kGeomVertexShader, kGeomFragmentShader);
     g_lightProgram = createProgram(kLightVertexShader, kLightFragmentShader);
+    g_blurProgram = createProgram(kLightVertexShader, kBlurFragmentShader);
+    g_finalProgram = createProgram(kLightVertexShader, kFinalFragmentShader);
     g_depthProgram = createProgram(kDepthVertexShader, kDepthFragmentShader);
     initShadowMap();
     initFullscreenQuad();
+    initLightSphere();
 
     int fbw, fbh;
     glfwGetFramebufferSize(window, &fbw, &fbh);
@@ -1292,6 +1672,14 @@ int main(int, char**)
 
     if (g_triceNormalTex) glDeleteTextures(1, &g_triceNormalTex);
 
+    if (g_hdrColorTex)    glDeleteTextures(1, &g_hdrColorTex);
+    if (g_brightColorTex) glDeleteTextures(1, &g_brightColorTex);
+    if (g_hdrFBO)         glDeleteFramebuffers(1, &g_hdrFBO);
+    glDeleteTextures(2, g_pingpongTex);
+    glDeleteFramebuffers(2, g_pingpongFBO);
+
+    if (g_blurProgram)    glDeleteProgram(g_blurProgram);
+    if (g_finalProgram)   glDeleteProgram(g_finalProgram);
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
