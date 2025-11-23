@@ -39,7 +39,8 @@ bool   g_mouseRot = false;
 double g_lastX = 0.0, g_lastY = 0.0;
 
 // Shader programs
-GLuint g_program = 0; // main pass
+GLuint g_geomProgram = 0; // geometry (G-buffer) pass
+GLuint g_lightProgram = 0; // lighting pass
 GLuint g_depthProgram = 0; // shadow-map depth pass
 
 // Shadow mapping globals
@@ -66,6 +67,24 @@ float     g_triceYaw = 0.0f;   // degrees
 
 // First mesh index that belongs to triceratops
 size_t g_triceFirstMesh = (size_t)-1;
+
+// ==============================
+// G-buffer (Deferred shading)
+// ==============================
+GLuint g_gbufferFBO = 0;
+GLuint g_gPositionTex = 0;
+GLuint g_gNormalTex = 0;
+GLuint g_gAmbientTex = 0;
+GLuint g_gDiffuseTex = 0;
+GLuint g_gSpecularTex = 0;
+GLuint g_gDepthRBO = 0;
+int    g_gbufferWidth = 0;
+int    g_gbufferHeight = 0;
+int g_viewMode = 0;
+
+// Fullscreen quad for lighting pass
+GLuint g_quadVAO = 0;
+GLuint g_quadVBO = 0;
 
 // ==============================
 // Mesh struct
@@ -230,112 +249,188 @@ static GLuint createProgram(const char* vsSrc, const char* fsSrc)
 // Shaders
 // ==============================
 
-// Main pass: Blinn-Phong + shadow sampling
-static const char* kVertexShader = R"(#version 410 core
+// Geometry pass: output world-pos, world-normal, ambient, diffuse, specular
+static const char* kGeomVertexShader = R"(#version 410 core
 layout(location = 0) in vec3 a_pos;
 layout(location = 1) in vec3 a_norm;
 layout(location = 2) in vec2 a_uv;
 
-out vec3 v_pos;
-out vec3 v_norm;
+out vec3 v_worldPos;
+out vec3 v_worldNorm;
 out vec2 v_uv;
-out vec4 v_posLightSpace;
 
 uniform mat4 u_model;
 uniform mat4 u_view;
 uniform mat4 u_proj;
-uniform mat4 u_lightVP;
 
 void main()
 {
-    vec4 wp  = u_model * vec4(a_pos, 1.0);
-    v_pos    = wp.xyz;
-    v_norm   = mat3(transpose(inverse(u_model))) * a_norm;
-    v_uv     = a_uv;
-    v_posLightSpace = u_lightVP * wp;
+    vec4 wp = u_model * vec4(a_pos, 1.0);
+    v_worldPos  = wp.xyz;
+    v_worldNorm = mat3(transpose(inverse(u_model))) * a_norm;
+    v_uv        = a_uv;
 
     gl_Position = u_proj * u_view * wp;
 }
 )";
 
-static const char* kFragmentShader = R"(#version 410 core
-in vec3 v_pos;
-in vec3 v_norm;
+static const char* kGeomFragmentShader = R"(#version 410 core
+in vec3 v_worldPos;
+in vec3 v_worldNorm;
 in vec2 v_uv;
-in vec4 v_posLightSpace;
 
-out vec4 FragColor;
+layout(location = 0) out vec4 gPosition;  // world-space position
+layout(location = 1) out vec4 gNormal;    // world-space normal
+layout(location = 2) out vec4 gAmbient;   // ambient color
+layout(location = 3) out vec4 gDiffuse;   // diffuse color
+layout(location = 4) out vec4 gSpecular;  // specular.rgb, shininess.a
 
-uniform vec3 u_eye;
-
-// point light parameters (position but uses directional shadow map)
-uniform vec3 u_lightPos;
-uniform vec3 u_Ia;
-uniform vec3 u_Id;
-uniform vec3 u_Is;
-
-// material parameters
 uniform vec3  u_Ka;
 uniform vec3  u_Kd;
 uniform vec3  u_Ks;
 uniform float u_Ns;
 
-// textures
 uniform sampler2D u_diffuseTex;
 uniform bool      u_useTex;
 
-// shadow map
-uniform sampler2D u_shadowMap;
-uniform float     u_shadowStrength;
-uniform bool      u_enableShadows;
+void main()
+{
+    vec3 Ka = u_Ka;
+    vec3 Kd = u_Kd;
+    if (u_useTex) {
+        vec4 tex = texture(u_diffuseTex, v_uv);
+        if (tex.a < 0.5)
+            discard; // alpha cutout, e.g. plant leaves
+        Kd = tex.rgb;
+        Ka = u_Ka * tex.rgb;
+    }
+
+    gPosition = vec4(v_worldPos, 1.0);
+    gNormal   = vec4(normalize(v_worldNorm), 0.0);
+    gAmbient  = vec4(Ka, 1.0);
+    gDiffuse  = vec4(Kd, 1.0);
+    gSpecular = vec4(u_Ks, u_Ns);
+}
+)";
+
+// Lighting pass: fullscreen quad using G-buffers + shadow map
+static const char* kLightVertexShader = R"(#version 410 core
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in vec2 a_uv;
+
+out vec2 v_uv;
 
 void main()
 {
-    vec3 N = normalize(v_norm);
-    vec3 L = normalize(u_lightPos - v_pos);
-    vec3 V = normalize(u_eye      - v_pos);
-    vec3 H = normalize(L + V);
+    v_uv = a_uv;
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+}
+)";
 
-    // diffuse color: from texture if present, otherwise Kd from MTL
-    vec3 diffuseColor = u_Kd;
-    if (u_useTex) {
-        vec4 tex = texture(u_diffuseTex, v_uv);
-        // Alpha test for leaves cutout, etc.
-        if (tex.a < 0.5)
-            discard;
-        diffuseColor = tex.rgb;
+static const char* kLightFragmentShader = R"(#version 410 core
+in vec2 v_uv;
+out vec4 FragColor;
+
+// G-buffers
+uniform sampler2D gPosition;
+uniform sampler2D gNormal;
+uniform sampler2D gAmbient;
+uniform sampler2D gDiffuse;
+uniform sampler2D gSpecular;
+
+// Camera & light
+uniform vec3 u_eye;
+uniform vec3 u_lightPos;
+uniform vec3 u_Ia;
+uniform vec3 u_Id;
+uniform vec3 u_Is;
+
+// Shadow map (+ light matrix)
+uniform sampler2D u_shadowMap;
+uniform mat4  u_lightVP;
+uniform float u_shadowStrength;
+uniform bool  u_enableShadows;
+
+// Debug view mode:
+// 0 = lighting, 1 = pos, 2 = normal, 3 = ambient,
+// 4 = diffuse, 5 = specular
+uniform int u_viewMode;
+
+void main()
+{
+    vec3 pos      = texture(gPosition, v_uv).xyz;
+    vec3 normal   = texture(gNormal,   v_uv).xyz;
+    vec3 Ka       = texture(gAmbient,  v_uv).rgb;
+    vec3 Kd       = texture(gDiffuse,  v_uv).rgb;
+    vec4 specData = texture(gSpecular, v_uv);
+    vec3 Ks       = specData.rgb;
+    float Ns      = max(specData.a, 1.0);
+
+    // Skip pixels with no geometry
+    if (pos == vec3(0.0)) {
+        FragColor = vec4(0.0);
+        return;
     }
+
+    // ---------- DEBUG VIEWS ----------
+    if (u_viewMode == 1) {
+        // world position, normalized for display
+        vec3 p = normalize(pos) * 0.5 + 0.5;
+        FragColor = vec4(p, 1.0);
+        return;
+    }
+    if (u_viewMode == 2) {
+        // world normal, normalized for display
+        vec3 n = normalize(normal) * 0.5 + 0.5;
+        FragColor = vec4(n, 1.0);
+        return;
+    }
+    if (u_viewMode == 3) {
+        // ambient color map
+        FragColor = vec4(Ka, 1.0);
+        return;
+    }
+    if (u_viewMode == 4) {
+        // diffuse color map
+        FragColor = vec4(Kd, 1.0);
+        return;
+    }
+    if (u_viewMode == 5) {
+        // specular color map (just show Ks.rgb)
+        FragColor = vec4(Ks, 1.0);
+        return;
+    }
+    // ---------- END DEBUG VIEWS ----------
+
+    // Normal lighting path
+    vec3 N = normalize(normal);
+    vec3 L = normalize(u_lightPos - pos);
+    vec3 V = normalize(u_eye      - pos);
+    vec3 H = normalize(L + V);
 
     float NdotL = max(dot(N, L), 0.0);
     float NdotH = max(dot(N, H), 0.0);
 
-    // Blinn-Phong base shading
-    vec3 ambient  = u_Ia * u_Ka;
-    vec3 diffuse  = u_Id * diffuseColor * NdotL;
-    vec3 specular = u_Is * u_Ks * pow(NdotH, u_Ns);
+    vec3 ambient  = u_Ia * Ka;
+    vec3 diffuse  = u_Id * Kd * NdotL;
+    vec3 specular = (NdotL > 0.0) ? (u_Is * Ks * pow(NdotH, Ns)) : vec3(0.0);
     vec3 direct   = diffuse + specular;
 
-    // === Shadow calculation ===
+    // Shadow computation
     float shadow = 0.0;
-
     if (u_enableShadows) {
-        // from clip space (light) to NDC
-        vec3 projCoords = v_posLightSpace.xyz / v_posLightSpace.w;
-        // NDC [-1,1] -> [0,1]
-        projCoords = projCoords * 0.5 + 0.5;
+        vec4 posLight   = u_lightVP * vec4(pos, 1.0);
+        vec3 projCoords = posLight.xyz / posLight.w;
+        projCoords      = projCoords * 0.5 + 0.5;
 
-        // only sample if inside light frustum
         if (projCoords.x >= 0.0 && projCoords.x <= 1.0 &&
             projCoords.y >= 0.0 && projCoords.y <= 1.0 &&
-            projCoords.z >= 0.0 && projCoords.z <= 1.0)
-        {
+            projCoords.z >= 0.0 && projCoords.z <= 1.0) {
+
             float currentDepth = projCoords.z;
-
-            // bias to reduce shadow acne
             float bias = max(0.005 * (1.0 - dot(N, L)), 0.0005);
-
-            // 3x3 PCF
             vec2 texelSize = 1.0 / vec2(textureSize(u_shadowMap, 0));
+
             for (int x = -1; x <= 1; ++x) {
                 for (int y = -1; y <= 1; ++y) {
                     float closestDepth = texture(
@@ -350,14 +445,12 @@ void main()
         }
     }
 
-    // how dark the fully–shadowed region is (0 = black, 1 = no dimming)
     float s = clamp(u_shadowStrength, 0.0, 1.0);
-
-    // in shadow: keep only s * direct light
     vec3 lighting = ambient + mix(direct * s, direct, 1.0 - shadow);
     FragColor = vec4(lighting, 1.0);
 }
 )";
+
 
 // Depth-only pass for shadow map
 static const char* kDepthVertexShader = R"(#version 410 core
@@ -590,6 +683,131 @@ static void initShadowMap()
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+// ==============================
+// G-buffer init / resize
+// ==============================
+static void initGBuffer(int width, int height)
+{
+    if (width <= 0 || height <= 0) return;
+
+    g_gbufferWidth = width;
+    g_gbufferHeight = height;
+
+    // Delete old resources if they exist
+    if (g_gPositionTex) glDeleteTextures(1, &g_gPositionTex);
+    if (g_gNormalTex)   glDeleteTextures(1, &g_gNormalTex);
+    if (g_gAmbientTex)  glDeleteTextures(1, &g_gAmbientTex);
+    if (g_gDiffuseTex)  glDeleteTextures(1, &g_gDiffuseTex);
+    if (g_gSpecularTex) glDeleteTextures(1, &g_gSpecularTex);
+    if (g_gDepthRBO)    glDeleteRenderbuffers(1, &g_gDepthRBO);
+    if (g_gbufferFBO)   glDeleteFramebuffers(1, &g_gbufferFBO);
+
+    glGenFramebuffers(1, &g_gbufferFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_gbufferFBO);
+
+    // Position (RGBA16F)
+    glGenTextures(1, &g_gPositionTex);
+    glBindTexture(GL_TEXTURE_2D, g_gPositionTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F,
+        width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+        GL_TEXTURE_2D, g_gPositionTex, 0);
+
+    // Normal (RGBA16F)
+    glGenTextures(1, &g_gNormalTex);
+    glBindTexture(GL_TEXTURE_2D, g_gNormalTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F,
+        width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+        GL_TEXTURE_2D, g_gNormalTex, 0);
+
+    // Ambient (RGBA8)
+    glGenTextures(1, &g_gAmbientTex);
+    glBindTexture(GL_TEXTURE_2D, g_gAmbientTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+        width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2,
+        GL_TEXTURE_2D, g_gAmbientTex, 0);
+
+    // Diffuse (RGBA8)
+    glGenTextures(1, &g_gDiffuseTex);
+    glBindTexture(GL_TEXTURE_2D, g_gDiffuseTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+        width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3,
+        GL_TEXTURE_2D, g_gDiffuseTex, 0);
+
+    // Specular (RGBA16F – RGB = Ks, A = Ns)
+    glGenTextures(1, &g_gSpecularTex);
+    glBindTexture(GL_TEXTURE_2D, g_gSpecularTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F,
+        width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT4,
+        GL_TEXTURE_2D, g_gSpecularTex, 0);
+
+    // Depth buffer
+    glGenRenderbuffers(1, &g_gDepthRBO);
+    glBindRenderbuffer(GL_RENDERBUFFER, g_gDepthRBO);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+        GL_RENDERBUFFER, g_gDepthRBO);
+
+    GLenum attachments[5] = {
+        GL_COLOR_ATTACHMENT0,
+        GL_COLOR_ATTACHMENT1,
+        GL_COLOR_ATTACHMENT2,
+        GL_COLOR_ATTACHMENT3,
+        GL_COLOR_ATTACHMENT4
+    };
+    glDrawBuffers(5, attachments);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        std::cerr << "ERROR: G-buffer FBO not complete!\n";
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+// ==============================
+// Fullscreen quad
+// ==============================
+static void initFullscreenQuad()
+{
+    if (g_quadVAO != 0) return;
+
+    float quadVerts[] = {
+        // positions   // uvs
+        -1.0f, -1.0f,  0.0f, 0.0f,
+         1.0f, -1.0f,  1.0f, 0.0f,
+        -1.0f,  1.0f,  0.0f, 1.0f,
+         1.0f,  1.0f,  1.0f, 1.0f
+    };
+
+    glGenVertexArrays(1, &g_quadVAO);
+    glGenBuffers(1, &g_quadVBO);
+
+    glBindVertexArray(g_quadVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, g_quadVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVerts), quadVerts, GL_STATIC_DRAW);
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+
+    glBindVertexArray(0);
+}
+
 // Helper to get current trice model matrix
 static glm::mat4 getTriceModel()
 {
@@ -642,11 +860,16 @@ static void renderShadowPass(const glm::mat4& lightVP)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-// Main pass: camera view, uses shadow map
+// Main display: deferred shading pipeline
 static void on_display(GLFWwindow* window)
 {
     int display_w, display_h;
     glfwGetFramebufferSize(window, &display_w, &display_h);
+
+    // Resize G-buffer if needed
+    if (display_w != g_gbufferWidth || display_h != g_gbufferHeight) {
+        initGBuffer(display_w, display_h);
+    }
 
     float aspect = (display_h > 0) ? (float)display_w / (float)display_h : 1.0f;
     glm::mat4 proj = glm::perspective(glm::radians(g_fov), aspect, 0.1f, 100.0f);
@@ -662,44 +885,15 @@ static void on_display(GLFWwindow* window)
     // 1) Shadow pass
     renderShadowPass(lightVP);
 
-    // 2) Main pass
-    glViewport(0, 0, display_w, display_h);
+    // 2) Geometry pass -> G-buffers
+    glBindFramebuffer(GL_FRAMEBUFFER, g_gbufferFBO);
+    glViewport(0, 0, g_gbufferWidth, g_gbufferHeight);
     glEnable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
-
-    glClearColor(g_clearColor.x * g_clearColor.w,
-        g_clearColor.y * g_clearColor.w,
-        g_clearColor.z * g_clearColor.w,
-        g_clearColor.w);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    glUseProgram(g_program);
-
-    // Common uniforms
-    glUniformMatrix4fv(glGetUniformLocation(g_program, "u_view"), 1, GL_FALSE, glm::value_ptr(view));
-    glUniformMatrix4fv(glGetUniformLocation(g_program, "u_proj"), 1, GL_FALSE, glm::value_ptr(proj));
-    glUniformMatrix4fv(glGetUniformLocation(g_program, "u_lightVP"), 1, GL_FALSE, glm::value_ptr(lightVP));
-    glUniform3fv(glGetUniformLocation(g_program, "u_eye"), 1, glm::value_ptr(g_eye));
-
-    // Light parameters from assignment
-    glm::vec3 lightPos = g_lightEye;
-    glm::vec3 Ia(0.1f, 0.1f, 0.1f);
-    glm::vec3 Id(0.7f, 0.7f, 0.7f);
-    glm::vec3 Is(0.2f, 0.2f, 0.2f);
-
-    glUniform3fv(glGetUniformLocation(g_program, "u_lightPos"), 1, glm::value_ptr(lightPos));
-    glUniform3fv(glGetUniformLocation(g_program, "u_Ia"), 1, glm::value_ptr(Ia));
-    glUniform3fv(glGetUniformLocation(g_program, "u_Id"), 1, glm::value_ptr(Id));
-    glUniform3fv(glGetUniformLocation(g_program, "u_Is"), 1, glm::value_ptr(Is));
-
-    // Shadow controls
-    glUniform1f(glGetUniformLocation(g_program, "u_shadowStrength"), g_shadowStrength);
-    glUniform1i(glGetUniformLocation(g_program, "u_enableShadows"), g_enableShadows ? 1 : 0);
-
-    // Bind shadow map to texture unit 1
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, g_shadowTex);
-    glUniform1i(glGetUniformLocation(g_program, "u_shadowMap"), 1);
+    glUseProgram(g_geomProgram);
+    glUniformMatrix4fv(glGetUniformLocation(g_geomProgram, "u_view"), 1, GL_FALSE, glm::value_ptr(view));
+    glUniformMatrix4fv(glGetUniformLocation(g_geomProgram, "u_proj"), 1, GL_FALSE, glm::value_ptr(proj));
 
     glm::mat4 triceModel = getTriceModel();
 
@@ -711,41 +905,100 @@ static void on_display(GLFWwindow* window)
         glm::mat4 model = isTrice ? triceModel : mesh.model;
 
         glBindVertexArray(mesh.vao);
-        glUniformMatrix4fv(glGetUniformLocation(g_program, "u_model"),
-            1, GL_FALSE, glm::value_ptr(model));
+        glUniformMatrix4fv(glGetUniformLocation(g_geomProgram, "u_model"), 1, GL_FALSE, glm::value_ptr(model));
 
-        // material (override for triceratops to make it stand out)
         glm::vec3 Ka = mesh.Ka;
         glm::vec3 Kd = mesh.Kd;
         glm::vec3 Ks = mesh.Ks;
         float     Ns = mesh.Ns;
-
-        bool useTex = (mesh.diffuseTex != 0);
+        bool      useTex = (mesh.diffuseTex != 0);
 
         if (isTrice) {
             Ka = glm::vec3(0.05f);
             Kd = glm::vec3(0.2f, 0.9f, 0.2f);
             Ks = glm::vec3(1.0f);
             Ns = 64.0f;
-            useTex = false; // solid colored dino
+            useTex = false; // keep solid green dino in deferred too
         }
 
-        glUniform3fv(glGetUniformLocation(g_program, "u_Ka"), 1, glm::value_ptr(Ka));
-        glUniform3fv(glGetUniformLocation(g_program, "u_Kd"), 1, glm::value_ptr(Kd));
-        glUniform3fv(glGetUniformLocation(g_program, "u_Ks"), 1, glm::value_ptr(Ks));
-        glUniform1f(glGetUniformLocation(g_program, "u_Ns"), Ns);
+        glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Ka"), 1, glm::value_ptr(Ka));
+        glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Kd"), 1, glm::value_ptr(Kd));
+        glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Ks"), 1, glm::value_ptr(Ks));
+        glUniform1f(glGetUniformLocation(g_geomProgram, "u_Ns"), Ns);
 
-        glUniform1i(glGetUniformLocation(g_program, "u_useTex"), useTex);
+        glUniform1i(glGetUniformLocation(g_geomProgram, "u_useTex"), useTex ? 1 : 0);
         if (useTex) {
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, mesh.diffuseTex);
-            glUniform1i(glGetUniformLocation(g_program, "u_diffuseTex"), 0);
+            glUniform1i(glGetUniformLocation(g_geomProgram, "u_diffuseTex"), 0);
         }
 
         glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, 0);
     }
 
     glBindVertexArray(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // 3) Lighting pass -> default framebuffer
+    glViewport(0, 0, display_w, display_h);
+    glDisable(GL_DEPTH_TEST);
+
+    glClearColor(g_clearColor.x * g_clearColor.w,
+        g_clearColor.y * g_clearColor.w,
+        g_clearColor.z * g_clearColor.w,
+        g_clearColor.w);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(g_lightProgram);
+
+    // Bind G-buffer textures
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_gPositionTex);
+    glUniform1i(glGetUniformLocation(g_lightProgram, "gPosition"), 0);
+
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, g_gNormalTex);
+    glUniform1i(glGetUniformLocation(g_lightProgram, "gNormal"), 1);
+
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, g_gAmbientTex);
+    glUniform1i(glGetUniformLocation(g_lightProgram, "gAmbient"), 2);
+
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, g_gDiffuseTex);
+    glUniform1i(glGetUniformLocation(g_lightProgram, "gDiffuse"), 3);
+
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, g_gSpecularTex);
+    glUniform1i(glGetUniformLocation(g_lightProgram, "gSpecular"), 4);
+
+    // Shadow map
+    glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_2D, g_shadowTex);
+    glUniform1i(glGetUniformLocation(g_lightProgram, "u_shadowMap"), 5);
+
+    // Camera / light uniforms
+    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_eye"), 1, glm::value_ptr(g_eye));
+
+    glm::vec3 lightPos = g_lightEye;
+    glm::vec3 Ia(0.1f, 0.1f, 0.1f);
+    glm::vec3 Id(0.7f, 0.7f, 0.7f);
+    glm::vec3 Is(0.2f, 0.2f, 0.2f);
+
+    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_lightPos"), 1, glm::value_ptr(lightPos));
+    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_Ia"), 1, glm::value_ptr(Ia));
+    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_Id"), 1, glm::value_ptr(Id));
+    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_Is"), 1, glm::value_ptr(Is));
+
+    glUniformMatrix4fv(glGetUniformLocation(g_lightProgram, "u_lightVP"), 1, GL_FALSE, glm::value_ptr(lightVP));
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_shadowStrength"), g_shadowStrength);
+    glUniform1i(glGetUniformLocation(g_lightProgram, "u_enableShadows"), g_enableShadows ? 1 : 0);
+    glUniform1i(glGetUniformLocation(g_lightProgram, "u_viewMode"), g_viewMode);
+
+    glBindVertexArray(g_quadVAO);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+
     glUseProgram(0);
 }
 
@@ -776,6 +1029,19 @@ static void on_gui()
 
     ImGui::Checkbox("Enable Shadows", &g_enableShadows);
     ImGui::SliderFloat("Shadow Strength", &g_shadowStrength, 0.0f, 1.0f);
+
+    ImGui::Separator();
+    ImGui::Text("G-Buffer Debug");
+
+    const char* modes[] = {
+        "Lighting",
+        "World Pos",
+        "World Normal",
+        "Ambient",
+        "Diffuse",
+        "Specular"
+    };
+    ImGui::Combo("View", &g_viewMode, modes, IM_ARRAYSIZE(modes));
 
     ImGui::Separator();
     ImGui::ColorEdit3("Clear color", (float*)&g_clearColor);
@@ -849,7 +1115,7 @@ static void cursor_pos_callback(GLFWwindow* window, double xpos, double ypos)
     g_lastY = ypos;
 
     glm::vec3 dir = g_eye - g_center;
-    float radius = glm::length(dir);
+    float     radius = glm::length(dir);
     if (radius < 1e-3f) return;
 
     float yaw = atan2(dir.z, dir.x);
@@ -917,9 +1183,15 @@ int main(int, char**)
     ImGui_ImplOpenGL3_Init(glsl_version);
 
     // Our GL resources
-    g_program = createProgram(kVertexShader, kFragmentShader);
+    g_geomProgram = createProgram(kGeomVertexShader, kGeomFragmentShader);
+    g_lightProgram = createProgram(kLightVertexShader, kLightFragmentShader);
     g_depthProgram = createProgram(kDepthVertexShader, kDepthFragmentShader);
     initShadowMap();
+    initFullscreenQuad();
+
+    int fbw, fbh;
+    glfwGetFramebufferSize(window, &fbw, &fbh);
+    initGBuffer(fbw, fbh);
 
     // Load models
     loadOBJScene("./assets/indoor_model/Grey_White_Room.obj", glm::mat4(1.0f));
@@ -956,10 +1228,23 @@ int main(int, char**)
         if (m.vao)        glDeleteVertexArrays(1, &m.vao);
     }
 
-    if (g_shadowTex)      glDeleteTextures(1, &g_shadowTex);
-    if (g_shadowFBO)      glDeleteFramebuffers(1, &g_shadowFBO);
-    if (g_depthProgram)   glDeleteProgram(g_depthProgram);
-    if (g_program)        glDeleteProgram(g_program);
+    if (g_shadowTex)    glDeleteTextures(1, &g_shadowTex);
+    if (g_shadowFBO)    glDeleteFramebuffers(1, &g_shadowFBO);
+    if (g_depthProgram) glDeleteProgram(g_depthProgram);
+
+    if (g_gPositionTex) glDeleteTextures(1, &g_gPositionTex);
+    if (g_gNormalTex)   glDeleteTextures(1, &g_gNormalTex);
+    if (g_gAmbientTex)  glDeleteTextures(1, &g_gAmbientTex);
+    if (g_gDiffuseTex)  glDeleteTextures(1, &g_gDiffuseTex);
+    if (g_gSpecularTex) glDeleteTextures(1, &g_gSpecularTex);
+    if (g_gDepthRBO)    glDeleteRenderbuffers(1, &g_gDepthRBO);
+    if (g_gbufferFBO)   glDeleteFramebuffers(1, &g_gbufferFBO);
+
+    if (g_geomProgram)  glDeleteProgram(g_geomProgram);
+    if (g_lightProgram) glDeleteProgram(g_lightProgram);
+
+    if (g_quadVBO)      glDeleteBuffers(1, &g_quadVBO);
+    if (g_quadVAO)      glDeleteVertexArrays(1, &g_quadVAO);
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
