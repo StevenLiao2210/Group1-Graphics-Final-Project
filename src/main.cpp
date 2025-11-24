@@ -50,6 +50,11 @@ GLuint g_shadowFBO = 0;
 GLuint g_shadowTex = 0;
 const int SHADOW_MAP_SIZE = 1024;
 
+const float g_pointShadowNear = 0.22f;
+const float g_pointShadowFar = 10.0f;
+
+glm::mat4 g_pointShadowMatrices[6];
+
 // Directional light camera (from spec)
 glm::vec3 g_lightEye = glm::vec3(1.87659f, 0.4625f, 0.103928f);
 glm::vec3 g_lightCenter = glm::vec3(0.0f, 0.5f, 0.0f);
@@ -404,11 +409,11 @@ uniform float u_attConst;
 uniform float u_attLinear;
 uniform float u_attQuadratic;
 
-// Shadow map (+ light matrix)
-uniform sampler2D u_shadowMap;
-uniform mat4  u_lightVP;
-uniform float u_shadowStrength;
-uniform bool  u_enableShadows;
+// Point light shadow cube
+uniform samplerCube u_shadowCube;
+uniform float       u_far;
+uniform float       u_shadowStrength;
+uniform bool        u_enableShadows;
 
 // Bloom
 uniform bool  u_enableBloom;
@@ -427,9 +432,9 @@ void main()
     vec3 Kd       = texture(gDiffuse,  v_uv).rgb;
     vec4 specData = texture(gSpecular, v_uv);
     vec3 Ks       = specData.rgb;
-    float NsRaw = specData.a;
-    bool isEmissive = (NsRaw < 0.0);
-    float Ns = max(NsRaw, 1.0);
+    float NsRaw   = specData.a;
+    bool  isEmissive = (NsRaw < 0.0);
+    float Ns      = max(NsRaw, 1.0);
 
     // Skip pixels with no geometry
     if (pos == vec3(0.0)) {
@@ -468,30 +473,21 @@ void main()
     }
     // ---------- END DEBUG VIEWS ----------
 
-        if (pos == vec3(0.0)) {
-            FragColor   = vec4(0.0);
-            BrightColor = vec4(0.0);
-            return;
+    // Emissive objects: encoded by negative shininess (NsRaw < 0.0)
+    if (isEmissive) {
+        vec3 emissive = Kd;
+
+        FragColor = vec4(emissive, 1.0);
+
+        vec3 bright = vec3(0.0);
+        if (u_enableBloom) {
+            float brightness = max(max(emissive.r, emissive.g), emissive.b);
+            if (brightness > u_bloomThreshold)
+                bright = emissive;
         }
-
-     // Emissive objects: encoded by negative shininess (NsRaw < 0.0)
-        if (isEmissive) {
-            vec3 emissive = Kd; // you set Kd = vec3(10.0) on the C++ side
-
-            // Base color is just emissive, no attenuation, no shadows
-            FragColor = vec4(emissive, 1.0);
-
-            // Send directly to bloom using the same threshold logic
-            vec3 bright = vec3(0.0);
-            if (u_enableBloom) {
-                float brightness = max(max(emissive.r, emissive.g), emissive.b);
-                if (brightness > u_bloomThreshold)
-                    bright = emissive;
-            }
-            BrightColor = vec4(bright, 1.0);
-            return;
-        }
-
+        BrightColor = vec4(bright, 1.0);
+        return;
+    }
 
     // Normal lighting path
     vec3 N = normalize(normal);
@@ -512,42 +508,23 @@ void main()
     float attenuation = 1.0 /
         (u_attConst + u_attLinear * dist + u_attQuadratic * dist * dist);
 
-    // only direct light is attenuated; ambient stays as room fill
     direct *= attenuation;
 
-    // Shadow computation
+    // ---- point light shadow from cube ----
     float shadow = 0.0;
     if (u_enableShadows) {
-        vec4 posLight   = u_lightVP * vec4(pos, 1.0);
-        vec3 projCoords = posLight.xyz / posLight.w;
-        projCoords      = projCoords * 0.5 + 0.5;
+        vec3  lightToFrag = pos - u_lightPos;
+        float currentDepth = length(lightToFrag);
+        float closestDepth = texture(u_shadowCube, lightToFrag).r * u_far;
 
-        if (projCoords.x >= 0.0 && projCoords.x <= 1.0 &&
-            projCoords.y >= 0.0 && projCoords.y <= 1.0 &&
-            projCoords.z >= 0.0 && projCoords.z <= 1.0) {
-
-            float currentDepth = projCoords.z;
-            float bias = max(0.005 * (1.0 - dot(N, L)), 0.0005);
-            vec2 texelSize = 1.0 / vec2(textureSize(u_shadowMap, 0));
-
-            for (int x = -1; x <= 1; ++x) {
-                for (int y = -1; y <= 1; ++y) {
-                    float closestDepth = texture(
-                        u_shadowMap,
-                        projCoords.xy + vec2(x, y) * texelSize
-                    ).r;
-                    if (currentDepth - bias > closestDepth)
-                        shadow += 1.0;
-                }
-            }
-            shadow /= 9.0;
-        }
+        float bias = 0.03;
+        shadow = (currentDepth - bias > closestDepth) ? 1.0 : 0.0;
     }
 
     float s = clamp(u_shadowStrength, 0.0, 1.0);
     vec3 lighting = ambient + mix(direct * s, direct, 1.0 - shadow);
 
-    // Bloom bright-pass: keep only pixels above threshold
+    // Bloom bright-pass
     vec3 bright = vec3(0.0);
     if (u_enableBloom) {
         float brightness = max(max(lighting.r, lighting.g), lighting.b);
@@ -555,10 +532,11 @@ void main()
             bright = lighting;
     }
 
-    FragColor   = vec4(lighting, 1.0);   // HDR scene color
-    BrightColor = vec4(bright, 1.0);     // bright parts for bloom
+    FragColor   = vec4(lighting, 1.0);
+    BrightColor = vec4(bright, 1.0);
 }
 )";
+
 
 // Gaussian blur for bloom (ping-pong)
 static const char* kBlurFragmentShader = R"(#version 410 core
@@ -618,24 +596,36 @@ void main()
 // Depth-only pass for shadow map
 static const char* kDepthVertexShader = R"(#version 410 core
 layout(location = 0) in vec3 a_pos;
-layout(location = 1) in vec3 a_norm;
-layout(location = 2) in vec2 a_uv;
+
+out vec3 v_worldPos;
 
 uniform mat4 u_model;
-uniform mat4 u_lightVP;
+uniform mat4 u_lightVP;   // per-face view-proj matrix
 
 void main()
 {
-    gl_Position = u_lightVP * u_model * vec4(a_pos, 1.0);
+    vec4 wp = u_model * vec4(a_pos, 1.0);
+    v_worldPos = wp.xyz;
+    gl_Position = u_lightVP * vec4(a_pos, 1.0);
 }
 )";
+
 
 static const char* kDepthFragmentShader = R"(#version 410 core
+in vec3 v_worldPos;
+
+uniform vec3  u_lightPos;
+uniform float u_far;
+
 void main()
 {
-    // depth is written automatically
+    // store radial distance / far in the cube depth
+    float dist = length(v_worldPos - u_lightPos);
+    dist = dist / u_far;          // 0..1
+    gl_FragDepth = dist;
 }
 )";
+
 
 // ==============================
 // OBJ loader (appends meshes to g_meshes)
@@ -822,21 +812,24 @@ static void initShadowMap()
     glGenFramebuffers(1, &g_shadowFBO);
     glGenTextures(1, &g_shadowTex);
 
-    glBindTexture(GL_TEXTURE_2D, g_shadowTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24,
-        SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0,
-        GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, g_shadowTex);
+    for (int i = 0; i < 6; ++i) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0,
+            GL_DEPTH_COMPONENT24,
+            SHADOW_MAP_SIZE, SHADOW_MAP_SIZE,
+            0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    }
 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-    float borderColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
 
     glBindFramebuffer(GL_FRAMEBUFFER, g_shadowFBO);
+    // Attach one face just to validate FBO; we'll reattach per-face later
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-        GL_TEXTURE_2D, g_shadowTex, 0);
+        GL_TEXTURE_CUBE_MAP_POSITIVE_X, g_shadowTex, 0);
     glDrawBuffer(GL_NONE);
     glReadBuffer(GL_NONE);
 
@@ -845,6 +838,7 @@ static void initShadowMap()
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
+
 
 static void initBloomBuffers(int width, int height)
 {
@@ -1133,35 +1127,73 @@ static glm::mat4 getTriceModel()
 // Rendering
 // ==============================
 
-// Depth pass: render scene from light POV into shadow map
-static void renderShadowPass(const glm::mat4& lightVP)
+// Build the 6 view-projection matrices for the point light
+static void buildPointShadowMatrices(const glm::vec3& lightPos)
 {
+    glm::mat4 proj = glm::perspective(glm::radians(90.0f),
+        1.0f,
+        g_pointShadowNear,
+        g_pointShadowFar);
+
+    g_pointShadowMatrices[0] = proj *
+        glm::lookAt(lightPos, lightPos + glm::vec3(1, 0, 0), glm::vec3(0, -1, 0));
+    g_pointShadowMatrices[1] = proj *
+        glm::lookAt(lightPos, lightPos + glm::vec3(-1, 0, 0), glm::vec3(0, -1, 0));
+    g_pointShadowMatrices[2] = proj *
+        glm::lookAt(lightPos, lightPos + glm::vec3(0, 1, 0), glm::vec3(0, 0, 1));
+    g_pointShadowMatrices[3] = proj *
+        glm::lookAt(lightPos, lightPos + glm::vec3(0, -1, 0), glm::vec3(0, 0, -1));
+    g_pointShadowMatrices[4] = proj *
+        glm::lookAt(lightPos, lightPos + glm::vec3(0, 0, 1), glm::vec3(0, -1, 0));
+    g_pointShadowMatrices[5] = proj *
+        glm::lookAt(lightPos, lightPos + glm::vec3(0, 0, -1), glm::vec3(0, -1, 0));
+}
+
+// Depth pass: render scene into cube shadow map
+static void renderShadowPass(const glm::vec3& lightPos)
+{
+    buildPointShadowMatrices(lightPos);
+
     glViewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
     glBindFramebuffer(GL_FRAMEBUFFER, g_shadowFBO);
-    glClear(GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST);
 
     glUseProgram(g_depthProgram);
 
     GLint locModel = glGetUniformLocation(g_depthProgram, "u_model");
     GLint locLightVP = glGetUniformLocation(g_depthProgram, "u_lightVP");
-    glUniformMatrix4fv(locLightVP, 1, GL_FALSE, glm::value_ptr(lightVP));
+    GLint locLightPos = glGetUniformLocation(g_depthProgram, "u_lightPos");
+    GLint locFar = glGetUniformLocation(g_depthProgram, "u_far");
+
+    glUniform3fv(locLightPos, 1, glm::value_ptr(lightPos));
+    glUniform1f(locFar, g_pointShadowFar);
 
     glm::mat4 triceModel = getTriceModel();
 
     glEnable(GL_CULL_FACE);
     glCullFace(GL_FRONT); // helps reduce acne
 
-    for (size_t i = 0; i < g_meshes.size(); ++i) {
-        const Mesh& mesh = g_meshes[i];
-        if (mesh.vao == 0 || mesh.indexCount <= 0) continue;
+    // Render for each cube face
+    for (int face = 0; face < 6; ++face) {
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+            GL_TEXTURE_CUBE_MAP_POSITIVE_X + face,
+            g_shadowTex, 0);
+        glClear(GL_DEPTH_BUFFER_BIT);
 
-        bool isTrice = (g_triceFirstMesh != (size_t)-1 && i >= g_triceFirstMesh);
-        glm::mat4 model = isTrice ? triceModel : mesh.model;
+        glUniformMatrix4fv(locLightVP, 1, GL_FALSE,
+            glm::value_ptr(g_pointShadowMatrices[face]));
 
-        glBindVertexArray(mesh.vao);
-        glUniformMatrix4fv(locModel, 1, GL_FALSE, glm::value_ptr(model));
-        glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, 0);
+        for (size_t i = 0; i < g_meshes.size(); ++i) {
+            const Mesh& mesh = g_meshes[i];
+            if (mesh.vao == 0 || mesh.indexCount <= 0) continue;
+
+            bool isTrice = (g_triceFirstMesh != (size_t)-1 && i >= g_triceFirstMesh);
+            glm::mat4 model = isTrice ? triceModel : mesh.model;
+
+            glBindVertexArray(mesh.vao);
+            glUniformMatrix4fv(locModel, 1, GL_FALSE, glm::value_ptr(model));
+            glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, 0);
+        }
     }
 
     glCullFace(GL_BACK);
@@ -1170,6 +1202,7 @@ static void renderShadowPass(const glm::mat4& lightVP)
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
+
 
 // Main display: deferred shading pipeline
 static void on_display(GLFWwindow* window)
@@ -1186,15 +1219,10 @@ static void on_display(GLFWwindow* window)
     glm::mat4 proj = glm::perspective(glm::radians(g_fov), aspect, 0.1f, 100.0f);
     glm::mat4 view = glm::lookAt(g_eye, g_center, g_up);
 
-    // Light matrices (directional)
-    glm::mat4 lightView = glm::lookAt(g_lightEye, g_lightCenter, g_lightUp);
-    glm::mat4 lightProj = glm::ortho(-g_lightRange, g_lightRange,
-        -g_lightRange, g_lightRange,
-        g_lightNear, g_lightFar);
-    glm::mat4 lightVP = lightProj * lightView;
+    glm::vec3 lightPos = g_lightEye; // point light position follows sphere
 
-    // 1) Shadow pass
-    renderShadowPass(lightVP);
+    // 1) Shadow pass (point light cube)
+    renderShadowPass(lightPos);
 
     // 2) Geometry pass -> G-buffers
     glBindFramebuffer(GL_FRAMEBUFFER, g_gbufferFBO);
@@ -1322,18 +1350,18 @@ static void on_display(GLFWwindow* window)
     glBindTexture(GL_TEXTURE_2D, g_gSpecularTex);
     glUniform1i(glGetUniformLocation(g_lightProgram, "gSpecular"), 4);
 
-    // Shadow map
+    // Shadow cube map
     glActiveTexture(GL_TEXTURE5);
-    glBindTexture(GL_TEXTURE_2D, g_shadowTex);
-    glUniform1i(glGetUniformLocation(g_lightProgram, "u_shadowMap"), 5);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, g_shadowTex);
+    glUniform1i(glGetUniformLocation(g_lightProgram, "u_shadowCube"), 5);
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_far"), g_pointShadowFar);
 
     // Camera / light uniforms
     glUniform3fv(glGetUniformLocation(g_lightProgram, "u_eye"), 1, glm::value_ptr(g_eye));
 
-    glm::vec3 lightPos = g_lightEye;  // same world-space position as before
-    glm::vec3 Ia(0.03f, 0.03f, 0.03f);
+    glm::vec3 Ia(0.08f, 0.08f, 0.08f);
     glm::vec3 Id(0.9f, 0.9f, 0.9f);
-    glm::vec3 Is(0.3f, 0.3f, 0.3f);
+    glm::vec3 Is(0.4f, 0.4f, 0.4f);
 
     glUniform3fv(glGetUniformLocation(g_lightProgram, "u_lightPos"), 1, glm::value_ptr(lightPos));
     glUniform3fv(glGetUniformLocation(g_lightProgram, "u_Ia"), 1, glm::value_ptr(Ia));
@@ -1341,10 +1369,9 @@ static void on_display(GLFWwindow* window)
     glUniform3fv(glGetUniformLocation(g_lightProgram, "u_Is"), 1, glm::value_ptr(Is));
 
     glUniform1f(glGetUniformLocation(g_lightProgram, "u_attConst"), 1.0f);
-    glUniform1f(glGetUniformLocation(g_lightProgram, "u_attLinear"), 0.7f);
-    glUniform1f(glGetUniformLocation(g_lightProgram, "u_attQuadratic"), 0.14f);
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_attLinear"), 0.22f);
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_attQuadratic"), 0.02f);
 
-    glUniformMatrix4fv(glGetUniformLocation(g_lightProgram, "u_lightVP"), 1, GL_FALSE, glm::value_ptr(lightVP));
     glUniform1f(glGetUniformLocation(g_lightProgram, "u_shadowStrength"), g_shadowStrength);
     glUniform1i(glGetUniformLocation(g_lightProgram, "u_enableShadows"), g_enableShadows ? 1 : 0);
     glUniform1i(glGetUniformLocation(g_lightProgram, "u_viewMode"), g_viewMode);
