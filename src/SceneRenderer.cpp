@@ -118,6 +118,8 @@ bool SceneRenderer::setUpShader(){
 	manager->m_fs_pixelProcessIdHandle = 2;
 	manager->m_fs_pureColor = 5;
 	manager->m_fs_terrainPass = 7;
+
+	manager->m_fs_blinnPhongObject = 6;
 	
 	return true;
 }

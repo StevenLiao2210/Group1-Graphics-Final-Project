@@ -156,9 +156,14 @@ static DynamicSceneObject* createDynamicObjFromObj(const std::string& objPath)
 	obj->updateDataBuffer(0, vertexBytes);
 	obj->updateIndexBuffer(0, indexBytes);
 
+	//obj->setPrimitive(GL_TRIANGLES);
+	//// for now just use pureColor() in fragment shader
+	//obj->setPixelFunctionId(SceneManager::Instance()->m_fs_pureColor);
+
+	//CORRECT BLIN phong shader
 	obj->setPrimitive(GL_TRIANGLES);
-	// for now just use pureColor() in fragment shader
-	obj->setPixelFunctionId(SceneManager::Instance()->m_fs_pureColor);
+	obj->setPixelFunctionId(SceneManager::Instance()->m_fs_blinnPhongObject);
+
 
 	return obj;
 }
