@@ -1,4 +1,4 @@
-#include <glad/glad.h>
+﻿#include <glad/glad.h>
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
@@ -15,12 +15,20 @@
 #include "terrain\MyTerrain.h"
 #include "MyCameraManager.h"
 
+#include <glm/gtc/matrix_transform.hpp>
+
+#define TINYOBJLOADER_IMPLEMENTATION
+#include "tiny_obj_loader.h"
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 const int INIT_WIDTH = 1024;
 const int INIT_HEIGHT = 512;
 
 // ==============================================
 // You can probably tell these come from class members,
-// but let's make them global for clarity�especially for those less familiar with C++ OOP.
+// but let's make them global for clarity—especially for those less familiar with C++ OOP.
 
 int displayWidth;
 int displayHeight;
@@ -33,9 +41,169 @@ ShaderProgram* defaultShaderProgram = nullptr;
 ViewFrustumSceneObject* m_viewFrustumSO = nullptr;
 MyTerrain* m_terrain = nullptr;
 INANOA::MyCameraManager* m_myCameraManager = nullptr;
+
+// === airplane & magic rock dynamic scene objects =====
+DynamicSceneObject* g_airplaneObj = nullptr;
+DynamicSceneObject* g_magicRockObj = nullptr;
+
 // ==============================================
 
 void resize_impl(int w, int h);
+
+// === Load an OBJ and build a DynamicSceneObjcet (position (3) + normal(3) + uv (3)) ===
+static DynamicSceneObject* createDynamicObjFromObj(const std::string& objPath)
+{
+	tinyobj::attrib_t attrib;
+	std::vector<tinyobj::shape_t> shapes;
+	std::vector<tinyobj::material_t> materials;
+	std::string warn, err;
+
+	bool ok = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, objPath.c_str());
+	if (!warn.empty()) std::cout << "[tinyobj warn] " << warn << "\n";
+	if (!err.empty())  std::cout << "[tinyobj err ] " << err << "\n";
+
+	if (!ok)
+	{
+		std::cout << "[createDynamicObjFromObj] Failed to load " << objPath << "\n";
+		return nullptr;
+	}
+
+	std::vector<float> positions;
+	std::vector<float> normals;
+	std::vector<float> texcoords;
+
+	for (const auto& shape : shapes)
+	{
+		size_t indexOffset = 0;
+		for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); ++f)
+		{
+			int fv = shape.mesh.num_face_vertices[f];
+			for (int v = 0; v < fv; ++v)
+			{
+				tinyobj::index_t idx = shape.mesh.indices[indexOffset + v];
+
+				// positions (must exist)
+				positions.push_back(attrib.vertices[3 * idx.vertex_index + 0]);
+				positions.push_back(attrib.vertices[3 * idx.vertex_index + 1]);
+				positions.push_back(attrib.vertices[3 * idx.vertex_index + 2]);
+
+				// normals (optional)
+				if (!attrib.normals.empty() && idx.normal_index >= 0)
+				{
+					normals.push_back(attrib.normals[3 * idx.normal_index + 0]);
+					normals.push_back(attrib.normals[3 * idx.normal_index + 1]);
+					normals.push_back(attrib.normals[3 * idx.normal_index + 2]);
+				}
+
+				// texcoords (optional)
+				if (!attrib.texcoords.empty() && idx.texcoord_index >= 0)
+				{
+					texcoords.push_back(attrib.texcoords[2 * idx.texcoord_index + 0]);
+					texcoords.push_back(attrib.texcoords[2 * idx.texcoord_index + 1]);
+				}
+			}
+			indexOffset += fv;
+		}
+	}
+
+	const int numVerts = static_cast<int>(positions.size() / 3);
+	if (numVerts == 0)
+		return nullptr;
+
+	// Make sure normals / uvs have correct length
+	if (static_cast<int>(normals.size()) != numVerts * 3)
+		normals.assign(numVerts * 3, 0.0f);
+	if (static_cast<int>(texcoords.size()) != numVerts * 2)
+		texcoords.assign(numVerts * 2, 0.0f);
+
+	// Create DynamicSceneObject with position + normal + uv
+	const int numIndices = numVerts;
+	DynamicSceneObject* obj = new DynamicSceneObject(
+		numVerts, numIndices,
+		/*normalFlag*/ true,
+		/*uvFlag*/ true
+	);
+
+	const int stride = 9; // 3 pos + 3 normal + 3 uv
+
+	float* dst = obj->dataBuffer();
+	for (int i = 0; i < numVerts; ++i)
+	{
+		// pos
+		dst[i * stride + 0] = positions[3 * i + 0];
+		dst[i * stride + 1] = positions[3 * i + 1];
+		dst[i * stride + 2] = positions[3 * i + 2];
+
+		// normal
+		dst[i * stride + 3] = normals[3 * i + 0];
+		dst[i * stride + 4] = normals[3 * i + 1];
+		dst[i * stride + 5] = normals[3 * i + 2];
+
+		// uv → vec3(u,v,0)
+		dst[i * stride + 6] = texcoords[2 * i + 0];
+		dst[i * stride + 7] = texcoords[2 * i + 1];
+		dst[i * stride + 8] = 0.0f;
+	}
+
+	// simple 0..N-1 index buffer
+	unsigned int* idx = obj->indexBuffer();
+	for (int i = 0; i < numVerts; ++i)
+		idx[i] = static_cast<unsigned int>(i);
+
+	const int vertexBytes = numVerts * stride * sizeof(float);
+	const int indexBytes = numIndices * sizeof(unsigned int);
+
+	obj->updateDataBuffer(0, vertexBytes);
+	obj->updateIndexBuffer(0, indexBytes);
+
+	obj->setPrimitive(GL_TRIANGLES);
+	// for now just use pureColor() in fragment shader
+	obj->setPixelFunctionId(SceneManager::Instance()->m_fs_pureColor);
+
+	return obj;
+}
+
+// === helper: create a GL texture from an image file via stb_image ===
+static GLuint createTextureFromFile(const char* path)
+{
+	int w, h, channels;
+	stbi_set_flip_vertically_on_load(true); // optional, usually better for OpenGL
+	unsigned char* data = stbi_load(path, &w, &h, &channels, 0);
+
+	if (!data) {
+		std::cout << "[stb_image] Failed to load texture: " << path << "\n";
+		return 0;
+	}
+
+	GLenum format = GL_RGB;
+	if (channels == 1)      format = GL_RED;
+	else if (channels == 3) format = GL_RGB;
+	else if (channels == 4) format = GL_RGBA;
+
+	GLuint tex = 0;
+	glGenTextures(1, &tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+
+	glTexImage2D(GL_TEXTURE_2D,
+		0,
+		(format == GL_RGBA ? GL_RGBA8 : GL_RGB8), // internal format
+		w, h,
+		0,
+		format,
+		GL_UNSIGNED_BYTE,
+		data);
+
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+	glBindTexture(GL_TEXTURE_2D, 0);
+	stbi_image_free(data);
+
+	return tex;
+}
+
 
 bool on_init(int displayWidth, int displayHeight)
 {
@@ -86,6 +254,24 @@ bool on_init(int displayWidth, int displayHeight)
 	defaultRenderer->appendTerrainSceneObject(m_terrain->sceneObject());
 	// =================================================================	
 
+	// === add airplane and magic rock
+	g_airplaneObj = createDynamicObjFromObj("assets/outdoor/airplane.obj");
+	if (g_airplaneObj) {
+		GLuint airplaneTex = createTextureFromFile("assets/outdoor/Airplane_smooth_DefaultMaterial_BaseMap.jpg");
+		g_airplaneObj->setAlbedoTexture(airplaneTex);
+		g_airplaneObj->setPixelFunctionId(SceneManager::Instance()->m_fs_terrainPass);
+		defaultRenderer->appendDynamicSceneObject(g_airplaneObj);
+	}
+
+	g_magicRockObj = createDynamicObjFromObj("assets/outdoor/MagicRock/magicRock.obj");
+	if (g_magicRockObj){
+		GLuint rockTexture = createTextureFromFile("assets/outdoor/MagicRock/StylMagicRocks_AlbedoTransparency.png");
+		g_magicRockObj->setAlbedoTexture(rockTexture);
+		g_magicRockObj->setPixelFunctionId(SceneManager::Instance()->m_fs_terrainPass);
+		defaultRenderer->appendDynamicSceneObject(g_magicRockObj);
+	}
+
+
 	resize_impl(displayWidth, displayHeight);
 	m_imguiPanel = new MyImGuiPanel();
 
@@ -100,6 +286,9 @@ void on_destroy()
 	delete m_viewFrustumSO;
 	delete m_terrain;
 	delete m_imguiPanel;
+	//ntoe: if we want to add new object, we also have to destroy it here
+	delete g_airplaneObj;
+	delete g_magicRockObj;
 }
 
 void viewFrustumMultiClipCorner(const std::vector<float>& depths, const glm::mat4& viewMat, const glm::mat4& projMat, float* clipCorner)
@@ -220,6 +409,17 @@ inline void on_display()
 
 	// (x, y, w, h)
 	const glm::ivec4 godViewport = m_myCameraManager->godViewport();
+
+	// === update airplane  & magic rock transforms ===
+	if (g_airplaneObj) {
+		g_airplaneObj->setModelMat(airplaneModelMat);
+	}
+	if (g_magicRockObj) {
+		glm::mat4 model = glm::mat4(1.0f);
+		//based onthe slides
+		model = glm::translate(model, glm::vec3(25.92f, 19.27f, 11.75f));
+		g_magicRockObj->setModelMat(model);
+	}
 
 	// ====================================================================================
 	// update player camera view frustum
