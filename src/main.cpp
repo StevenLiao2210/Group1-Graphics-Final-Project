@@ -137,6 +137,15 @@ const int   SSAO_KERNEL_SIZE = 64;
 float g_ssaoRadius = 0.5f;    // spec
 float g_ssaoBias = 0.025f;  // spec
 
+// ==============================
+// Screen-Space Reflection (SSR)
+// ==============================
+bool  g_enableSSR = true;   // toggle
+float g_ssrMaxDistance = 6.0f;   // how far the ray can travel
+int   g_ssrMaxSteps = 40;     // how many steps
+float g_ssrStep = 0.15f;  // distance between samples
+float g_ssrThickness = 0.15f;  // depth tolerance for hit
+float g_ssrIntensity = 0.8f;   // how strong the reflection is
 
 // ==============================
 // Mesh struct
@@ -443,10 +452,141 @@ uniform float u_bloomThreshold;
 uniform bool      u_enableSSAO;
 uniform sampler2D u_ssaoTex;
 
+// ===== SSR =====
+uniform bool  u_enableSSR;
+uniform mat4  u_view;
+uniform mat4  u_proj;
+uniform float u_ssrMaxDistance;
+uniform int   u_ssrMaxSteps;
+uniform float u_ssrStep;
+uniform float u_ssrThickness;
+uniform float u_ssrIntensity;
+
 // Debug view mode:
 // 0 = lighting, 1 = pos, 2 = normal, 3 = ambient,
 // 4 = diffuse, 5 = specular
 uniform int u_viewMode;
+
+bool isFloorPixel(vec3 pos, vec3 normal)
+{
+    // Your floor is basically at y = 0 with upward normal
+    // Adjust eps if needed.
+    float epsY = 0.2;
+    bool nearPlane = (pos.y > -epsY && pos.y < epsY);
+    bool normalUp  = normal.y > 0.8;
+    return nearPlane && normalUp;
+}
+
+vec3 computeSSR(vec3 pos, vec3 normal,
+                vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
+{
+    // Ray origin & direction in world space
+    vec3 N = normalize(normal);
+    vec3 V = normalize(u_eye - pos);      // view direction (towards eye)
+    vec3 R = reflect(-V, N);              // reflection direction (into scene)
+
+    vec3 rayOrigin = pos + N * 0.02;      // small bias
+
+    float t = 0.1;
+    vec3 hitColor = vec3(0.0);
+    bool hit = false;
+
+    for (int i = 0; i < u_ssrMaxSteps; ++i) {
+        if (t > u_ssrMaxDistance)
+            break;
+
+        vec3 samplePos = rayOrigin + R * t;
+
+        // project samplePos to screen to get UV
+        vec4 clip = u_proj * u_view * vec4(samplePos, 1.0);
+        if (clip.w <= 0.0) {
+            t += u_ssrStep;
+            continue;
+        }
+
+        vec3 ndc = clip.xyz / clip.w;
+        // outside screen?
+        if (ndc.x < -1.0 || ndc.x > 1.0 ||
+            ndc.y < -1.0 || ndc.y > 1.0) {
+            t += u_ssrStep;
+            continue;
+        }
+
+        vec2 uv = ndc.xy * 0.5 + 0.5;
+
+        vec3 scenePos = texture(gPosition, uv).xyz;
+        if (scenePos == vec3(0.0)) {
+            t += u_ssrStep;
+            continue;
+        }
+
+        // Reject self-hits on the floor itself (prevents banding)
+        vec3 sceneNormal = texture(gNormal, uv).xyz;
+        if (isFloorPixel(scenePos, sceneNormal)) {
+            t += u_ssrStep;
+            continue;
+        }
+
+        // Compare depths from the camera instead of from the ray origin
+        float rayDepth   = length(samplePos - u_eye);
+        float sceneDepth = length(scenePos - u_eye);
+
+        // depth intersection test (screen-space ray vs scene)
+        if (abs(sceneDepth - rayDepth) < u_ssrThickness) {
+            // Hit: fetch G-buffer data at that point and re-compute lighting
+            vec3 hitNormal = sceneNormal;
+            vec3 hitKa     = texture(gAmbient, uv).rgb;
+            vec3 hitKd     = texture(gDiffuse, uv).rgb;
+            vec4 hitSpec   = texture(gSpecular, uv);
+            vec3 hitKs     = hitSpec.rgb;
+            float hitNsRaw = hitSpec.a;
+            bool  hitEmissive = (hitNsRaw < 0.0);
+            float hitNs   = max(hitNsRaw, 1.0);
+
+            if (hitEmissive) {
+                hitColor = hitKd;   // emissive: just use color
+            } else {
+                vec3 hN = normalize(hitNormal);
+                vec3 L  = normalize(u_lightPos - scenePos);
+                vec3 V2 = normalize(u_eye      - scenePos);
+                vec3 H2 = normalize(L + V2);
+
+                float NdotL2 = max(dot(hN, L), 0.0);
+                float NdotH2 = max(dot(hN, H2), 0.0);
+
+                float ao2 = 1.0;
+                if (u_enableSSAO) {
+                    ao2 = texture(u_ssaoTex, uv).r;
+                }
+
+                vec3 ambient2  = (hitKa * hitKd) * u_Ia * ao2;
+                vec3 diffuse2  = u_Id * hitKd * NdotL2;
+                vec3 specular2 = (NdotL2 > 0.0)
+                    ? (u_Is * hitKs * pow(NdotH2, hitNs))
+                    : vec3(0.0);
+                vec3 direct2   = diffuse2 + specular2;
+
+                float dist2 = length(u_lightPos - scenePos);
+                float atten2 = 1.0 /
+                    (u_attConst + u_attLinear * dist2 + u_attQuadratic * dist2 * dist2);
+
+                direct2 *= atten2;
+                hitColor = ambient2 + direct2;
+            }
+
+            hit = true;
+            break;
+        }
+
+        t += u_ssrStep;
+    }
+
+    if (!hit)
+        return vec3(0.0);
+
+    return hitColor;
+}
+
 
 void main()
 {
@@ -553,6 +693,14 @@ void main()
 
     float s = clamp(u_shadowStrength, 0.0, 1.0);
     vec3 lighting = ambient + mix(direct * s, direct, 1.0 - shadow);
+
+    // ===== Screen-Space Reflection on floor =====
+    if (u_enableSSR && isFloorPixel(pos, normal)) {
+        vec3 refl = computeSSR(pos, normal, Ka, Kd, Ks, NsRaw);
+        // if refl is nonzero, blend it in
+        lighting = mix(lighting, refl, u_ssrIntensity);
+    }
+
 
     // Bloom bright-pass
     vec3 bright = vec3(0.0);
@@ -1618,6 +1766,21 @@ static void on_display(GLFWwindow* window)
     glUniform1i(glGetUniformLocation(g_lightProgram, "u_enableBloom"), g_enableBloom ? 1 : 0);
     glUniform1f(glGetUniformLocation(g_lightProgram, "u_bloomThreshold"), g_bloomThreshold);
 
+    // View / proj for SSR
+    glUniformMatrix4fv(glGetUniformLocation(g_lightProgram, "u_view"),
+        1, GL_FALSE, glm::value_ptr(view));
+    glUniformMatrix4fv(glGetUniformLocation(g_lightProgram, "u_proj"),
+        1, GL_FALSE, glm::value_ptr(proj));
+
+    // SSR params
+    glUniform1i(glGetUniformLocation(g_lightProgram, "u_enableSSR"), g_enableSSR ? 1 : 0);
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_ssrMaxDistance"), g_ssrMaxDistance);
+    glUniform1i(glGetUniformLocation(g_lightProgram, "u_ssrMaxSteps"), g_ssrMaxSteps);
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_ssrStep"), g_ssrStep);
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_ssrThickness"), g_ssrThickness);
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_ssrIntensity"), g_ssrIntensity);
+
+
     glBindVertexArray(g_quadVAO);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
@@ -1720,6 +1883,16 @@ static void on_gui()
     ImGui::Checkbox("Enable SSAO", &g_enableSSAO);
     ImGui::SliderFloat("SSAO Radius", &g_ssaoRadius, 0.1f, 1.0f);
     ImGui::SliderFloat("SSAO Bias", &g_ssaoBias, 0.0f, 0.1f);
+
+    ImGui::Separator();
+    ImGui::Text("Screen-Space Reflection (floor)");
+    ImGui::Checkbox("Enable SSR (floor)", &g_enableSSR);
+    ImGui::SliderFloat("SSR Intensity", &g_ssrIntensity, 0.0f, 1.0f);
+    ImGui::SliderFloat("SSR Max Distance", &g_ssrMaxDistance, 1.0f, 10.0f);
+    ImGui::SliderInt("SSR Max Steps", &g_ssrMaxSteps, 10, 80);
+    ImGui::SliderFloat("SSR Step", &g_ssrStep, 0.05f, 0.5f);
+    ImGui::SliderFloat("SSR Thickness", &g_ssrThickness, 0.01f, 0.4f);
+
 
     ImGui::Separator();
     ImGui::Text("G-Buffer Debug");
