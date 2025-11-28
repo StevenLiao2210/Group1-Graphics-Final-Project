@@ -635,6 +635,17 @@ void main()
         BrightColor = vec4(0.0);
         return;
     }
+
+    // NEW: SSAO debug view
+    if (u_viewMode == 6) {
+        float ao = 1.0;
+        if (u_enableSSAO) {
+            ao = texture(u_ssaoTex, v_uv).r;
+        }
+        FragColor   = vec4(vec3(ao), 1.0); // grayscale AO
+        BrightColor = vec4(0.0);
+        return;
+    }
     // ---------- END DEBUG VIEWS ----------
 
     // Emissive objects: encoded by negative shininess (NsRaw < 0.0)
@@ -669,7 +680,7 @@ void main()
 
     // Hint: multiply ambient by diffuse color for better look
     vec3 ambient  = (Ka * Kd) * u_Ia * ao;
-    vec3 diffuse  = u_Id * Kd * NdotL;
+    vec3 diffuse  = u_Id * Kd * NdotL * ao;
     vec3 specular = (NdotL > 0.0) ? (u_Is * Ks * pow(NdotH, Ns)) : vec3(0.0);
     vec3 direct   = diffuse + specular;
 
@@ -867,8 +878,14 @@ void main()
             occlusion += rangeCheck;
     }
 
-    occlusion = 1.0 - (occlusion / 64.0);
-    FragColor = occlusion;
+    float ao = 1.0 - (occlusion / 64.0);
+    ao = clamp(ao, 0.0, 1.0);
+
+    // boost contrast so contact areas get much darker
+    // tweak the exponent: 2.0 ~ subtle, 3–4 = stronger effect
+    ao = pow(ao, 2.5);
+
+    FragColor = ao;
 }
 )";
 
@@ -1903,7 +1920,8 @@ static void on_gui()
         "World Normal",
         "Ambient",
         "Diffuse",
-        "Specular"
+        "Specular",
+        "SSAO"
     };
     ImGui::Combo("View", &g_viewMode, modes, IM_ARRAYSIZE(modes));
 
