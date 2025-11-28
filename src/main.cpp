@@ -113,7 +113,7 @@ int    g_bloomWidth = 0;
 int    g_bloomHeight = 0;
 
 bool   g_enableBloom = true;
-float  g_bloomThreshold = 1.2f;
+float  g_bloomThreshold = 1.0f;
 float  g_bloomIntensity = 0.8f;
 float  g_exposure = 1.5f;
 int    g_blurIterations = 10;
@@ -129,7 +129,7 @@ struct Mesh {
 
     GLuint    diffuseTex = 0;             // map_Kd
     glm::vec3 Ka = glm::vec3(0.1f);       // ambient
-    glm::vec3 Kd = glm::vec3(1.0f);       // diffuse
+    glm::vec3 Kd = glm::vec3(5.0f);       // diffuse
     glm::vec3 Ks = glm::vec3(0.0f);       // specular
     float     Ns = 32.0f;                 // shininess
 
@@ -606,7 +606,7 @@ void main()
 {
     vec4 wp = u_model * vec4(a_pos, 1.0);
     v_worldPos = wp.xyz;
-    gl_Position = u_lightVP * vec4(a_pos, 1.0);
+    gl_Position = u_lightVP * wp;
 }
 )";
 
@@ -1301,7 +1301,7 @@ static void on_display(GLFWwindow* window)
             1, GL_FALSE, glm::value_ptr(model));
 
         // emissive color stored in Kd
-        glm::vec3 Kd = glm::vec3(20.0f);  // bright white so bloom works
+        glm::vec3 Kd = glm::vec3(50.0f);  // bright white so bloom works
         glm::vec3 Ka = glm::vec3(0.0f);
         glm::vec3 Ks = glm::vec3(0.0f);
         float Ns = -1.0f;    // <---- negative shininess marks emissive
@@ -1359,7 +1359,7 @@ static void on_display(GLFWwindow* window)
     // Camera / light uniforms
     glUniform3fv(glGetUniformLocation(g_lightProgram, "u_eye"), 1, glm::value_ptr(g_eye));
 
-    glm::vec3 Ia(0.08f, 0.08f, 0.08f);
+    glm::vec3 Ia(0.02f, 0.02f, 0.02f);
     glm::vec3 Id(0.9f, 0.9f, 0.9f);
     glm::vec3 Is(0.4f, 0.4f, 0.4f);
 
@@ -1369,8 +1369,8 @@ static void on_display(GLFWwindow* window)
     glUniform3fv(glGetUniformLocation(g_lightProgram, "u_Is"), 1, glm::value_ptr(Is));
 
     glUniform1f(glGetUniformLocation(g_lightProgram, "u_attConst"), 1.0f);
-    glUniform1f(glGetUniformLocation(g_lightProgram, "u_attLinear"), 0.22f);
-    glUniform1f(glGetUniformLocation(g_lightProgram, "u_attQuadratic"), 0.02f);
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_attLinear"), 0.7f);
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_attQuadratic"), 0.14f);
 
     glUniform1f(glGetUniformLocation(g_lightProgram, "u_shadowStrength"), g_shadowStrength);
     glUniform1i(glGetUniformLocation(g_lightProgram, "u_enableShadows"), g_enableShadows ? 1 : 0);
@@ -1411,9 +1411,9 @@ static void on_display(GLFWwindow* window)
     // 5) Final combine: HDR scene + blurred bloom -> default framebuffer
     glViewport(0, 0, display_w, display_h);
 
-    glClearColor(g_clearColor.x* g_clearColor.w,
-        g_clearColor.y* g_clearColor.w,
-        g_clearColor.z* g_clearColor.w,
+    glClearColor(g_clearColor.x * g_clearColor.w,
+        g_clearColor.y * g_clearColor.w,
+        g_clearColor.z * g_clearColor.w,
         g_clearColor.w);
     glClear(GL_COLOR_BUFFER_BIT);
 
