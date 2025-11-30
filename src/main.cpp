@@ -168,6 +168,17 @@ struct Mesh {
 std::vector<Mesh> g_meshes;
 
 // ==============================
+// Rectangular area light (world-space)
+// ==============================
+glm::vec3 g_areaCenter = glm::vec3(1.0f, 0.5f, -0.5f); // given
+glm::vec2 g_areaSize = glm::vec2(1.0f, 1.0f);        // width, height
+glm::vec3 g_areaEuler = glm::vec3(0.0f, 0.0f, 0.0f);  // pitch, yaw, roll in deg
+glm::vec3 g_areaColor = glm::vec3(0.8f, 0.6f, 0.0f);  // given color
+int       g_areaSamples = 16;                          // 4x4 stratified samples
+
+
+
+// ==============================
 // GLFW error callback
 // ==============================
 static void glfw_error_callback(int error, const char* description)
@@ -462,10 +473,86 @@ uniform float u_ssrStep;
 uniform float u_ssrThickness;
 uniform float u_ssrIntensity;
 
+// Rectangular area light
+uniform vec3 u_rectCenter;
+uniform vec3 u_rectNormal;
+uniform vec3 u_rectTangent;
+uniform vec3 u_rectBitangent;
+uniform vec2 u_rectSize;       // full width/height in world units
+uniform vec3 u_rectColor;
+uniform int  u_rectSamples;    // how many samples we’ll use
+
+
 // Debug view mode:
 // 0 = lighting, 1 = pos, 2 = normal, 3 = ambient,
 // 4 = diffuse, 5 = specular
 uniform int u_viewMode;
+
+vec3 evalRectAreaLight(vec3 pos, vec3 N,
+                       vec3 Ka, vec3 Kd, vec3 Ks,
+                       float NsRaw)
+{
+    // one-sided Lambertian emitter
+    const int MAX_SAMPLES = 32; // safety; will clamp u_rectSamples
+    int S = clamp(u_rectSamples, 1, MAX_SAMPLES);
+
+    float halfW = 0.5 * u_rectSize.x;
+    float halfH = 0.5 * u_rectSize.y;
+    float area  = u_rectSize.x * u_rectSize.y;
+
+    vec3 accum = vec3(0.0);
+
+    // simple 4x4 (up to 32) stratified pattern, no RNG needed
+    int grid = int(ceil(sqrt(float(S))));
+    int used = 0;
+
+    for (int j = 0; j < grid && used < S; ++j)
+    {
+        for (int i = 0; i < grid && used < S; ++i, ++used)
+        {
+            // [0,1] in cell, then [-0.5,0.5] across rectangle
+            float u = (float(i) + 0.5) / float(grid) - 0.5;
+            float v = (float(j) + 0.5) / float(grid) - 0.5;
+
+            vec3 samplePos =
+                u_rectCenter +
+                (u * 2.0 * halfW) * u_rectTangent +
+                (v * 2.0 * halfH) * u_rectBitangent;
+
+            vec3 L   = samplePos - pos;
+            float d2 = dot(L, L);
+            if (d2 <= 0.0) continue;
+
+            vec3 wi = normalize(L);
+
+            // surface faces the light?
+            float NdotL = max(dot(N, wi), 0.0);
+            if (NdotL <= 0.0) continue;
+
+            // light emits only on one side (front side)
+            float NL_light = max(dot(-u_rectNormal, wi), 0.0);
+            if (NL_light <= 0.0) continue;
+
+            // geometric term ~ cos(theta_surf)*cos(theta_light)/r^2
+            float G = (NdotL * NL_light) / d2;
+
+            accum += G;
+        }
+    }
+
+    if (used == 0) return vec3(0.0);
+
+    // average over samples, multiply by area and light color
+    float factor = area / float(used);
+    vec3 radiance = u_rectColor * accum * factor;
+
+    // diffuse only (you can add specular if you want)
+    return Kd * radiance;
+}
+
+
+
+
 
 bool isFloorPixel(vec3 pos, vec3 normal)
 {
@@ -664,46 +751,28 @@ void main()
         return;
     }
 
-    // Normal lighting path
-    vec3 N = normalize(normal);
-    vec3 L = normalize(u_lightPos - pos);
-    vec3 V = normalize(u_eye      - pos);
-    vec3 H = normalize(L + V);
-
-    float NdotL = max(dot(N, L), 0.0);
-    float NdotH = max(dot(N, H), 0.0);
+        vec3 N = normalize(normal);
 
     float ao = 1.0;
     if (u_enableSSAO) {
         ao = texture(u_ssaoTex, v_uv).r;
     }
 
-    // Hint: multiply ambient by diffuse color for better look
-    vec3 ambient  = (Ka * Kd) * u_Ia * ao;
-    vec3 diffuse  = u_Id * Kd * NdotL * ao;
-    vec3 specular = (NdotL > 0.0) ? (u_Is * Ks * pow(NdotH, Ns)) : vec3(0.0);
-    vec3 direct   = diffuse + specular;
+    // ambient from scene + SSAO
+    vec3 ambient = (Ka * Kd) * u_Ia * ao;
 
-    // ---- point light attenuation ----
-    float dist = length(u_lightPos - pos);
-    float attenuation = 1.0 /
-        (u_attConst + u_attLinear * dist + u_attQuadratic * dist * dist);
+    // rectangular area light (no distance attenuation; geometry is inside eval)
+    vec3 direct = evalRectAreaLight(pos, N, Ka, Kd, Ks, NsRaw);
 
-    direct *= attenuation;
+    // (optional) you can still scale overall strength with u_Id / u_Is if desired:
+    direct *= u_Id;
 
-    // ---- point light shadow from cube ----
+    // for now, disable point-light shadowing for the area light
     float shadow = 0.0;
-    if (u_enableShadows) {
-        vec3  lightToFrag = pos - u_lightPos;
-        float currentDepth = length(lightToFrag);
-        float closestDepth = texture(u_shadowCube, lightToFrag).r * u_far;
+    float s = 1.0; // no "shadowStrength" dimming
 
-        float bias = 0.03;
-        shadow = (currentDepth - bias > closestDepth) ? 1.0 : 0.0;
-    }
+    vec3 lighting = ambient + direct;
 
-    float s = clamp(u_shadowStrength, 0.0, 1.0);
-    vec3 lighting = ambient + mix(direct * s, direct, 1.0 - shadow);
 
     // ===== Screen-Space Reflection on floor =====
     if (u_enableSSR && isFloorPixel(pos, normal)) {
@@ -1551,6 +1620,27 @@ static void renderShadowPass(const glm::vec3& lightPos)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+static void buildAreaLightBasis(glm::vec3& outNormal, glm::vec3& outTangent, glm::vec3& outBitangent)
+{
+    // Start as a +Z facing quad
+    glm::mat4 R(1.0f);
+    float pitch = glm::radians(g_areaEuler.x); // rotate around X
+    float yaw = glm::radians(g_areaEuler.y); // rotate around Y
+    float roll = glm::radians(g_areaEuler.z); // rotate around Z
+
+
+    R = glm::rotate(R, yaw, glm::vec3(0, 1, 0)); // Yaw
+    R = glm::rotate(R, pitch, glm::vec3(1, 0, 0)); // Pitch
+    R = glm::rotate(R, roll, glm::vec3(0, 0, 1)); // Roll
+
+
+    outNormal = glm::normalize(glm::vec3(R * glm::vec4(0, 0, 1, 0)));
+    outTangent = glm::normalize(glm::vec3(R * glm::vec4(1, 0, 0, 0)));
+    outBitangent = glm::normalize(glm::vec3(R * glm::vec4(0, 1, 0, 0)));
+}
+
+
+
 
 // Main display: deferred shading pipeline
 static void on_display(GLFWwindow* window)
@@ -1802,6 +1892,19 @@ static void on_display(GLFWwindow* window)
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
 
+    // ----- area light basis -----
+    glm::vec3 rectN, rectT, rectB;
+    buildAreaLightBasis(rectN, rectT, rectB);
+
+    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_rectCenter"), 1, glm::value_ptr(g_areaCenter));
+    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_rectNormal"), 1, glm::value_ptr(rectN));
+    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_rectTangent"), 1, glm::value_ptr(rectT));
+    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_rectBitangent"), 1, glm::value_ptr(rectB));
+    glUniform2fv(glGetUniformLocation(g_lightProgram, "u_rectSize"), 1, glm::value_ptr(g_areaSize));
+    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_rectColor"), 1, glm::value_ptr(g_areaColor));
+    glUniform1i(glGetUniformLocation(g_lightProgram, "u_rectSamples"), g_areaSamples);
+
+
     // 4) Blur bright texture (gaussian ping-pong)
     bool horizontal = true;
     bool firstIter = true;
@@ -1909,6 +2012,15 @@ static void on_gui()
     ImGui::SliderInt("SSR Max Steps", &g_ssrMaxSteps, 10, 80);
     ImGui::SliderFloat("SSR Step", &g_ssrStep, 0.05f, 0.5f);
     ImGui::SliderFloat("SSR Thickness", &g_ssrThickness, 0.01f, 0.4f);
+
+    
+    ImGui::Separator();
+    ImGui::Text("Rectangular Area Light");
+    ImGui::DragFloat3("Center", &g_areaCenter.x, 0.01f);
+    ImGui::DragFloat2("Size (W,H)", &g_areaSize.x, 0.01f, 0.01f, 5.0f);
+    ImGui::DragFloat3("Euler (pitch,yaw,roll)", &g_areaEuler.x, 0.5f, -180.0f, 180.0f);
+    ImGui::ColorEdit3("Area Color", &g_areaColor.x);
+    ImGui::SliderInt("Samples", &g_areaSamples, 1, 32);
 
 
     ImGui::Separator();
