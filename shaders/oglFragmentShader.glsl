@@ -4,11 +4,15 @@ in vec3 f_viewVertex;
 in vec3 f_uv;
 // NEW: view-space normal
 in vec3 f_viewNormal;
+// filter
+in vec3 f_worldVertex;
 
 layout (location = 0) out vec4 fragColor;
 
 layout(location = 2) uniform int pixelProcessId;
 layout(location = 4) uniform sampler2D albedoTexture;
+
+layout(location = 10) uniform int filterMode;
 
 
 vec4 withFog(vec4 color) {
@@ -25,7 +29,12 @@ vec4 withFog(vec4 color) {
     return colorWithFog;
 }
 
-
+// filter
+vec4 worldSpaceVertexFilter() {
+    vec3 n = normalize(f_worldVertex);
+    vec3 color = n * 0.5 + 0.5;
+    return vec4(color, 1.0);
+}
 
 // Generic Blinn-Phong using view-space N, V, light dir
 vec4 blinnPhong(vec4 baseColor) {
@@ -71,6 +80,12 @@ void blinnPhongObject() {
 }
 
 void main() {
+
+    if (filterMode == 1) {
+        fragColor = worldSpaceVertexFilter();
+        return;
+    }
+
     if (pixelProcessId == 5) {
         // used by view frustum lines etc.
         pureColor();

@@ -33,6 +33,8 @@ const int INIT_HEIGHT = 512;
 int displayWidth;
 int displayHeight;
 
+int g_filterView = 0;
+
 double cursorPos[2];
 
 MyImGuiPanel* m_imguiPanel = nullptr;
@@ -435,10 +437,12 @@ inline void on_display()
 	// =============================================
 
 	// =============================================
-	// start rendering
-	// start new frame
-	defaultRenderer->setViewport(0, 0, displayWidth, displayHeight);
-	defaultRenderer->startNewFrame();
+    // start rendering
+	defaultRenderer->setFilterMode(g_filterView);
+
+    // start new frame
+    defaultRenderer->setViewport(0, 0, displayWidth, displayHeight);
+    defaultRenderer->startNewFrame();
 
 	// rendering with player view		
 	defaultRenderer->setViewport(playerViewport[0], playerViewport[1], playerViewport[2], playerViewport[3]);
@@ -460,7 +464,15 @@ inline void on_gui()
 
 	ImGui::Begin("Information");
 	m_imguiPanel->update();
-	ImGui::End();
+
+	// filrer switch
+    ImGui::Separator();
+    ImGui::Text("Filter");
+
+    ImGui::RadioButton("Original", &g_filterView, 0);
+    ImGui::RadioButton("World space vertex", &g_filterView, 1);
+
+    ImGui::End();
 }
 
 

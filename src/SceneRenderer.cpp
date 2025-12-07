@@ -1,8 +1,10 @@
 #include "SceneRenderer.h"
+#include <glad/glad.h> 
 
 
 SceneRenderer::SceneRenderer()
 {
+	m_debugView = 0; 
 }
 
 
@@ -11,7 +13,8 @@ SceneRenderer::~SceneRenderer()
 }
 void SceneRenderer::startNewFrame() {
 	this->m_shaderProgram->useProgram();
-	this->clear();
+	glUniform1i(10, m_filterMode);
+ 	this->clear();
 }
 void SceneRenderer::renderPass(){
 	SceneManager *manager = SceneManager::Instance();	
@@ -31,6 +34,16 @@ void SceneRenderer::renderPass(){
 		}
 	}
 	
+}
+// =======================================
+void SceneRenderer::setDebugView(int mode)
+{
+    m_debugView = mode;
+}
+
+int SceneRenderer::debugView() const
+{
+    return m_debugView;
 }
 
 // =======================================

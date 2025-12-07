@@ -8,6 +8,8 @@ out vec3 f_viewVertex;
 out vec3 f_uv;
 // NEW: view-space normal for Blinn-Phong
 out vec3 f_viewNormal;
+// filter
+out vec3 f_worldVertex;
 
 layout(location = 0) uniform mat4 modelMat;
 layout(location = 5) uniform sampler2D elevationMap;
@@ -22,6 +24,7 @@ void commonProcess() {
     // world-space
     vec4 worldVertex = modelMat * vec4(v_vertex, 1.0);
     vec4 worldNormal = modelMat * vec4(v_normal, 0.0);
+    f_worldVertex = worldVertex.xyz;
 
     // view-space
     vec4 viewVertex = viewMat * worldVertex;
@@ -53,6 +56,7 @@ void terrainProcess() {
     // to view space
     vec4 viewVertex = viewMat * worldV;
     vec4 viewNormal = viewMat * vec4(normalTex.rgb, 0.0);
+    f_worldVertex = worldV.xyz;
 
     f_viewVertex = viewVertex.xyz;
     f_viewNormal = normalize(viewNormal.xyz);
