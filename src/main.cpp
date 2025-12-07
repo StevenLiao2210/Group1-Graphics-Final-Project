@@ -471,6 +471,9 @@ inline void on_gui()
 
     ImGui::RadioButton("Original", &g_filterView, 0);
     ImGui::RadioButton("World space vertex", &g_filterView, 1);
+	ImGui::RadioButton("World space normal", &g_filterView, 2);
+	ImGui::RadioButton("Diffuse", &g_filterView, 3);
+	ImGui::RadioButton("Specular", &g_filterView, 4);
 
     ImGui::End();
 }

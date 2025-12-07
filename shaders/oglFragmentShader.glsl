@@ -6,6 +6,8 @@ in vec3 f_uv;
 in vec3 f_viewNormal;
 // filter
 in vec3 f_worldVertex;
+in vec3 f_worldNormal;
+flat in int f_objectType;
 
 layout (location = 0) out vec4 fragColor;
 
@@ -35,6 +37,29 @@ vec4 worldSpaceVertexFilter() {
     vec3 color = n * 0.5 + 0.5;
     return vec4(color, 1.0);
 }
+
+vec4 worldSpaceNormalFilter() {
+    vec3 n = normalize(f_worldNormal);
+    vec3 color = n * 0.5 + 0.5;
+    return vec4(color, 1.0);
+}
+
+vec4 diffuseFilter() {
+    vec3 color;
+    color = texture(albedoTexture, f_uv.xy).rgb;
+    return vec4(color, 1.0);
+}
+
+
+vec4 specularFilter() {
+    if (f_objectType == 0) {
+        return vec4(1.0, 1.0, 1.0, 1.0);
+    } else {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+}
+
+
 
 // Generic Blinn-Phong using view-space N, V, light dir
 vec4 blinnPhong(vec4 baseColor) {
@@ -83,6 +108,18 @@ void main() {
 
     if (filterMode == 1) {
         fragColor = worldSpaceVertexFilter();
+        return;
+    }
+    if (filterMode == 2) {
+        fragColor = worldSpaceNormalFilter();
+        return;
+    }
+    if (filterMode == 3) {
+        fragColor = diffuseFilter();
+        return;
+    }
+    if (filterMode == 4) {
+        fragColor = specularFilter();
         return;
     }
 

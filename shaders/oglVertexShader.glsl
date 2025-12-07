@@ -10,6 +10,8 @@ out vec3 f_uv;
 out vec3 f_viewNormal;
 // filter
 out vec3 f_worldVertex;
+out vec3 f_worldNormal;
+flat out int f_objectType;
 
 layout(location = 0) uniform mat4 modelMat;
 layout(location = 5) uniform sampler2D elevationMap;
@@ -24,7 +26,11 @@ void commonProcess() {
     // world-space
     vec4 worldVertex = modelMat * vec4(v_vertex, 1.0);
     vec4 worldNormal = modelMat * vec4(v_normal, 0.0);
+
+    // filter
     f_worldVertex = worldVertex.xyz;
+    f_worldNormal = normalize(worldNormal.xyz);
+    f_objectType = 0;
 
     // view-space
     vec4 viewVertex = viewMat * worldVertex;
@@ -56,16 +62,24 @@ void terrainProcess() {
     // to view space
     vec4 viewVertex = viewMat * worldV;
     vec4 viewNormal = viewMat * vec4(normalTex.rgb, 0.0);
-    f_worldVertex = worldV.xyz;
 
     f_viewVertex = viewVertex.xyz;
     f_viewNormal = normalize(viewNormal.xyz);
     f_uv = uv.xyz;
+    
+    // filter
+    f_worldVertex = worldV.xyz;
+    f_worldNormal = normalize(normalTex.xyz);
+    f_objectType = 1;
 
     gl_Position = projMat * viewVertex;
 }
 
+
+
+
 void main() {
+
     if (vertexProcessIdx == 0) {
         commonProcess();
     }
