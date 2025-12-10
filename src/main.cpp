@@ -64,12 +64,19 @@ float     g_lightNear = 0.1f;
 float     g_lightFar = 10.0f;
 float     g_lightRange = 5.0f;  // ortho box half-size
 
+// Point light sphere (visual)
 GLuint g_lightSphereVAO = 0;
 GLuint g_lightSphereVBO = 0;
 GLuint g_lightSphereEBO = 0;
 GLsizei g_lightSphereIndexCount = 0;
 
 const float g_lightSphereRadius = 0.22f;  // from assignment
+
+// Rectangular area light mesh (visible emitter)
+GLuint g_areaRectVAO = 0;
+GLuint g_areaRectVBO = 0;
+GLuint g_areaRectEBO = 0;
+GLsizei g_areaRectIndexCount = 0;
 
 // Shadow strength + toggle (debug / tuning)
 float g_shadowStrength = 0.0f;  // 0 = fully black shadow, 1 = no shadow dimming
@@ -175,7 +182,36 @@ glm::vec2 g_areaSize = glm::vec2(1.0f, 1.0f);        // width, height
 glm::vec3 g_areaEuler = glm::vec3(0.0f, 0.0f, 0.0f);  // pitch, yaw, roll in deg
 glm::vec3 g_areaColor = glm::vec3(0.8f, 0.6f, 0.0f);  // given color
 int       g_areaSamples = 16;                          // 4x4 stratified samples
+bool      g_enableAreaLight = true;
 
+// ==============================
+// Volumetric light scattering ("God Rays")
+// ==============================
+GLuint g_volumetricFBO = 0;
+GLuint g_volumetricTex = 0;
+int    g_volWidth = 0;
+int    g_volHeight = 0;
+GLuint g_volumetricProgram = 0;
+
+bool  g_enableVolumetric = true;
+int   g_volNumSamples = 100;      // demo spec
+float g_volExposure = 0.2f;     // exposure in formula
+float g_volDecay = 0.96815f; // decay
+float g_volDensity = 0.926f;   // density
+float g_volWeight = 0.58767f; // weight
+float g_volIntensity = 1.0f;     // how strong in final image
+
+float g_volThreshold = 0.7f;   // brightness threshold
+float g_volSourceRadius = 0.05f;  // on-screen radius around light
+
+// Demo "sun" light for volumetric (from spec)
+bool      g_useDemoVolLight = true;
+glm::vec3 g_volDemoLightPos(
+    -2.845f * 5.0f,
+    2.028f * 2.5f,
+    -1.293f * 5.0f
+);
+bool      g_showVolDemoSphere = true;
 
 
 // ==============================
@@ -481,7 +517,7 @@ uniform vec3 u_rectBitangent;
 uniform vec2 u_rectSize;       // full width/height in world units
 uniform vec3 u_rectColor;
 uniform int  u_rectSamples;    // how many samples we’ll use
-
+uniform bool u_enableAreaLight; 
 
 // Debug view mode:
 // 0 = lighting, 1 = pos, 2 = normal, 3 = ambient,
@@ -550,14 +586,8 @@ vec3 evalRectAreaLight(vec3 pos, vec3 N,
     return Kd * radiance;
 }
 
-
-
-
-
 bool isFloorPixel(vec3 pos, vec3 normal)
 {
-    // Your floor is basically at y = 0 with upward normal
-    // Adjust eps if needed.
     float epsY = 0.2;
     bool nearPlane = (pos.y > -epsY && pos.y < epsY);
     bool normalUp  = normal.y > 0.8;
@@ -751,36 +781,68 @@ void main()
         return;
     }
 
-        vec3 N = normalize(normal);
+    // ----- NORMAL LIGHTING PATH -----
+    vec3 N = normalize(normal);
 
     float ao = 1.0;
     if (u_enableSSAO) {
         ao = texture(u_ssaoTex, v_uv).r;
     }
 
-    // ambient from scene + SSAO
+    // ambient
     vec3 ambient = (Ka * Kd) * u_Ia * ao;
 
-    // rectangular area light (no distance attenuation; geometry is inside eval)
-    vec3 direct = evalRectAreaLight(pos, N, Ka, Kd, Ks, NsRaw);
+    // ========== POINT LIGHT (sphere) ==========
 
-    // (optional) you can still scale overall strength with u_Id / u_Is if desired:
-    direct *= u_Id;
+    vec3 L = normalize(u_lightPos - pos);
+    vec3 V = normalize(u_eye - pos);
+    vec3 H = normalize(L + V);
 
-    // for now, disable point-light shadowing for the area light
+    float NdotL = max(dot(N, L), 0.0);
+    float NdotH = max(dot(N, H), 0.0);
+
+    vec3 diffuse  = u_Id * Kd * NdotL;
+    vec3 specular = (NdotL > 0.0)
+        ? (u_Is * Ks * pow(NdotH, Ns))
+        : vec3(0.0);
+
+    vec3 directPoint = diffuse + specular;
+
+    // attenuation
+    float dist = length(u_lightPos - pos);
+    float attenuation = 1.0 /
+        (u_attConst + u_attLinear * dist + u_attQuadratic * dist * dist);
+    directPoint *= attenuation;
+
+    // shadows
     float shadow = 0.0;
-    float s = 1.0; // no "shadowStrength" dimming
+    if (u_enableShadows) {
+        vec3  lightToFrag = pos - u_lightPos;
+        float currentDepth = length(lightToFrag);
+        float closestDepth = texture(u_shadowCube, lightToFrag).r * u_far;
 
-    vec3 lighting = ambient + direct;
+        float bias = 0.03;
+        shadow = (currentDepth - bias > closestDepth) ? 1.0 : 0.0;
+    }
+
+    float s = clamp(u_shadowStrength, 0.0, 1.0);
+    vec3 pointWithShadow = mix(directPoint * s, directPoint, 1.0 - shadow);
+
+    // ========== RECTANGULAR AREA LIGHT ==========
+    vec3 directArea = vec3(0.0);
+    if (u_enableAreaLight) {
+        directArea = evalRectAreaLight(pos, N, Ka, Kd, Ks, NsRaw) * u_Id;
+    }
+
+    // total lighting
+    vec3 lighting = ambient + pointWithShadow + directArea;
 
 
     // ===== Screen-Space Reflection on floor =====
     if (u_enableSSR && isFloorPixel(pos, normal)) {
         vec3 refl = computeSSR(pos, normal, Ka, Kd, Ks, NsRaw);
-        // if refl is nonzero, blend it in
         lighting = mix(lighting, refl, u_ssrIntensity);
     }
-
 
     // Bloom bright-pass
     vec3 bright = vec3(0.0);
@@ -829,14 +891,27 @@ out vec4 FragColor;
 
 uniform sampler2D u_scene;
 uniform sampler2D u_bloomBlur;
+uniform sampler2D u_volumetric;
+
 uniform bool  u_enableBloom;
+uniform bool  u_enableVolumetric;
 uniform float u_bloomIntensity;
+uniform float u_volumetricIntensity;
 uniform float u_exposure;
+
 
 void main()
 {
     vec3 hdrColor   = texture(u_scene,     v_uv).rgb;
     vec3 bloomColor = texture(u_bloomBlur, v_uv).rgb;
+    vec3 volColor   = vec3(0.0);
+
+    if (u_enableVolumetric) {
+        volColor = texture(u_volumetric, v_uv).rgb * u_volumetricIntensity;
+    }
+
+    // Treat volumetric as extra HDR light before tone mapping
+    hdrColor += volColor;
 
     if (u_enableBloom) {
         hdrColor += bloomColor * u_bloomIntensity;
@@ -844,6 +919,7 @@ void main()
 
     // simple exponential tone mapping
     vec3 mapped = vec3(1.0) - exp(-hdrColor * u_exposure);
+
     // gamma correction
     FragColor = vec4(mapped, 1.0);
 }
@@ -951,12 +1027,77 @@ void main()
     ao = clamp(ao, 0.0, 1.0);
 
     // boost contrast so contact areas get much darker
-    // tweak the exponent: 2.0 ~ subtle, 3–4 = stronger effect
     ao = pow(ao, 2.5);
 
     FragColor = ao;
 }
 )";
+
+
+// Volumetric light scattering ("god rays") post-process
+static const char* kVolumetricFragmentShader = R"(#version 410 core
+in vec2 v_uv;
+out vec4 FragColor;
+
+// This is now the *bright-pass / occlusion* texture
+uniform sampler2D u_scene;          // g_brightColorTex
+
+uniform vec2  u_lightScreenPos;     // [0,1] screen-space
+uniform int   u_numSamples;         // e.g. 100
+uniform float u_exposure;           // 0.0 ~ 1.0
+uniform float u_decay;              // ~0.96815
+uniform float u_density;           // ~0.926
+uniform float u_weight;             // ~0.58767
+
+// Optional: threshold on the occlusion buffer to ignore tiny noise
+uniform float u_threshold;          // you already have this uniform
+
+void main()
+{
+    // If light is off-screen, no rays
+    if (u_lightScreenPos.x < 0.0 || u_lightScreenPos.x > 1.0 ||
+        u_lightScreenPos.y < 0.0 || u_lightScreenPos.y > 1.0)
+    {
+        FragColor = vec4(0.0);
+        return;
+    }
+
+    vec2 texCoord      = v_uv;
+    vec2 delta         = (texCoord - u_lightScreenPos);
+    delta             *= (u_density / float(u_numSamples));
+
+    vec2  sampleCoord        = texCoord;
+    float illuminationDecay  = 1.0;
+    float accumulatedLumin   = 0.0;
+
+    for (int i = 0; i < u_numSamples; ++i)
+    {
+        sampleCoord -= delta;
+
+        // Sample the bright-pass/occlusion buffer
+        vec3 c = texture(u_scene, sampleCoord).rgb;
+
+        // Convert to a single scalar (luminance or just max component)
+        float lum = max(max(c.r, c.g), c.b);
+
+        // Optional threshold to kill tiny noise
+        if (lum > u_threshold)
+        {
+            lum *= illuminationDecay * u_weight;
+            accumulatedLumin += lum;
+        }
+
+        illuminationDecay *= u_decay;
+    }
+
+    float intensity = accumulatedLumin * u_exposure;
+    FragColor = vec4(vec3(intensity), 1.0);
+}
+)";
+
+
+
+
 
 
 
@@ -1327,6 +1468,43 @@ static void initSSAOBuffer(int width, int height)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+static void initVolumetricBuffer(int width, int height)
+{
+    if (width <= 0 || height <= 0) return;
+    if (width == g_volWidth && height == g_volHeight) return;
+
+    g_volWidth = width;
+    g_volHeight = height;
+
+    if (g_volumetricTex) glDeleteTextures(1, &g_volumetricTex);
+    if (g_volumetricFBO) glDeleteFramebuffers(1, &g_volumetricFBO);
+
+    glGenFramebuffers(1, &g_volumetricFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_volumetricFBO);
+
+    glGenTextures(1, &g_volumetricTex);
+    glBindTexture(GL_TEXTURE_2D, g_volumetricTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F,
+        width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+        GL_TEXTURE_2D, g_volumetricTex, 0);
+
+    GLenum drawBuf = GL_COLOR_ATTACHMENT0;
+    glDrawBuffers(1, &drawBuf);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        std::cerr << "ERROR: Volumetric FBO not complete!\n";
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+
 
 // ==============================
 // G-buffer init / resize
@@ -1422,7 +1600,9 @@ static void initGBuffer(int width, int height)
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     initBloomBuffers(width, height);
-	initSSAOBuffer(width, height);
+    initSSAOBuffer(width, height);
+    initVolumetricBuffer(width, height);
+
 }
 
 // ==============================
@@ -1529,6 +1709,53 @@ static void initLightSphere()
     glBindVertexArray(0);
 }
 
+// ==============================
+// Area rectangle mesh init
+// ==============================
+static void initAreaRectMesh()
+{
+    if (g_areaRectVAO != 0) return;
+
+    struct V {
+        glm::vec3 pos;
+        glm::vec3 norm;
+        glm::vec2 uv;
+    };
+
+    // Unit quad in local space, in the XY plane, facing +Z
+    V verts[4] = {
+        { glm::vec3(-1.0f, -1.0f, 0.0f), glm::vec3(0, 0, 1), glm::vec2(0.0f, 0.0f) },
+        { glm::vec3(1.0f, -1.0f, 0.0f), glm::vec3(0, 0, 1), glm::vec2(1.0f, 0.0f) },
+        { glm::vec3(1.0f,  1.0f, 0.0f), glm::vec3(0, 0, 1), glm::vec2(1.0f, 1.0f) },
+        { glm::vec3(-1.0f,  1.0f, 0.0f), glm::vec3(0, 0, 1), glm::vec2(0.0f, 1.0f) },
+    };
+
+    unsigned indices[6] = { 0, 1, 2, 0, 2, 3 };
+    g_areaRectIndexCount = 6;
+
+    glGenVertexArrays(1, &g_areaRectVAO);
+    glGenBuffers(1, &g_areaRectVBO);
+    glGenBuffers(1, &g_areaRectEBO);
+
+    glBindVertexArray(g_areaRectVAO);
+
+    glBindBuffer(GL_ARRAY_BUFFER, g_areaRectVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_areaRectEBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(V), (void*)offsetof(V, pos));
+
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(V), (void*)offsetof(V, norm));
+
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(V), (void*)offsetof(V, uv));
+
+    glBindVertexArray(0);
+}
 
 // Helper to get current trice model matrix
 static glm::mat4 getTriceModel()
@@ -1538,6 +1765,31 @@ static glm::mat4 getTriceModel()
     m = glm::rotate(m, glm::radians(g_triceYaw), glm::vec3(0.0f, 1.0f, 0.0f));
     m = glm::scale(m, glm::vec3(g_triceScale));
     return m;
+}
+
+// Area rectangle model matrix (matching area light basis)
+static glm::mat4 getAreaRectModel()
+{
+    glm::mat4 M(1.0f);
+
+    // Translate to center
+    M = glm::translate(M, g_areaCenter);
+
+    // Same rotation order as buildAreaLightBasis()
+    float pitch = glm::radians(g_areaEuler.x);
+    float yaw = glm::radians(g_areaEuler.y);
+    float roll = glm::radians(g_areaEuler.z);
+
+    M = glm::rotate(M, yaw, glm::vec3(0, 1, 0)); // Yaw
+    M = glm::rotate(M, pitch, glm::vec3(1, 0, 0)); // Pitch
+    M = glm::rotate(M, roll, glm::vec3(0, 0, 1)); // Roll
+
+    // Scale unit quad [-1,1]x[-1,1] -> actual size (width, height)
+    M = glm::scale(M, glm::vec3(g_areaSize.x * 0.5f,
+        g_areaSize.y * 0.5f,
+        1.0f));
+
+    return M;
 }
 
 // ==============================
@@ -1628,17 +1880,14 @@ static void buildAreaLightBasis(glm::vec3& outNormal, glm::vec3& outTangent, glm
     float yaw = glm::radians(g_areaEuler.y); // rotate around Y
     float roll = glm::radians(g_areaEuler.z); // rotate around Z
 
-
     R = glm::rotate(R, yaw, glm::vec3(0, 1, 0)); // Yaw
     R = glm::rotate(R, pitch, glm::vec3(1, 0, 0)); // Pitch
     R = glm::rotate(R, roll, glm::vec3(0, 0, 1)); // Roll
-
 
     outNormal = glm::normalize(glm::vec3(R * glm::vec4(0, 0, 1, 0)));
     outTangent = glm::normalize(glm::vec3(R * glm::vec4(1, 0, 0, 0)));
     outBitangent = glm::normalize(glm::vec3(R * glm::vec4(0, 1, 0, 0)));
 }
-
 
 
 
@@ -1726,6 +1975,32 @@ static void on_display(GLFWwindow* window)
         glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, 0);
     }
 
+    // ---- Emissive Area Rect (visible rectangle light) ----
+    if (g_areaRectVAO != 0 && g_enableAreaLight)
+    {
+        glm::mat4 model = getAreaRectModel();
+
+        glBindVertexArray(g_areaRectVAO);
+
+        glUniformMatrix4fv(glGetUniformLocation(g_geomProgram, "u_model"),
+            1, GL_FALSE, glm::value_ptr(model));
+
+        glm::vec3 Kd = g_areaColor * 20.0f;  // tweak for bloom
+        glm::vec3 Ka = glm::vec3(0.0f);
+        glm::vec3 Ks = glm::vec3(0.0f);
+        float Ns = -1.0f;                    // negative => emissive
+
+        glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Ka"), 1, glm::value_ptr(Ka));
+        glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Kd"), 1, glm::value_ptr(Kd));
+        glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Ks"), 1, glm::value_ptr(Ks));
+        glUniform1f(glGetUniformLocation(g_geomProgram, "u_Ns"), Ns);
+
+        glUniform1i(glGetUniformLocation(g_geomProgram, "u_useTex"), 0);
+        glUniform1i(glGetUniformLocation(g_geomProgram, "u_useNormalMap"), 0);
+
+        glDrawElements(GL_TRIANGLES, g_areaRectIndexCount, GL_UNSIGNED_INT, 0);
+    }
+
     // ---- Emissive Point Light Sphere ----
     if (g_lightSphereVAO != 0)
     {
@@ -1742,7 +2017,7 @@ static void on_display(GLFWwindow* window)
         glm::vec3 Kd = glm::vec3(50.0f);  // bright white so bloom works
         glm::vec3 Ka = glm::vec3(0.0f);
         glm::vec3 Ks = glm::vec3(0.0f);
-        float Ns = -1.0f;    // <---- negative shininess marks emissive
+        float Ns = -1.0f;    // negative shininess marks emissive
 
         glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Ka"), 1, glm::value_ptr(Ka));
         glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Kd"), 1, glm::value_ptr(Kd));
@@ -1755,10 +2030,38 @@ static void on_display(GLFWwindow* window)
         glDrawElements(GL_TRIANGLES, g_lightSphereIndexCount, GL_UNSIGNED_INT, 0);
     }
 
+    // NEW: small emissive sphere at volumetric demo light position
+    if (g_lightSphereVAO != 0 && g_showVolDemoSphere)
+    {
+        glm::mat4 model(1.0f);
+        model = glm::translate(model, g_volDemoLightPos);
+        model = glm::scale(model, glm::vec3(g_lightSphereRadius * 0.6f));
+
+        glBindVertexArray(g_lightSphereVAO);
+
+        glUniformMatrix4fv(glGetUniformLocation(g_geomProgram, "u_model"),
+            1, GL_FALSE, glm::value_ptr(model));
+
+        glm::vec3 Kd = glm::vec3(40.0f); // bright white "sun"
+        glm::vec3 Ka = glm::vec3(0.0f);
+        glm::vec3 Ks = glm::vec3(0.0f);
+        float Ns = -1.0f; // emissive
+
+        glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Ka"), 1, glm::value_ptr(Ka));
+        glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Kd"), 1, glm::value_ptr(Kd));
+        glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Ks"), 1, glm::value_ptr(Ks));
+        glUniform1f(glGetUniformLocation(g_geomProgram, "u_Ns"), Ns);
+
+        glUniform1i(glGetUniformLocation(g_geomProgram, "u_useTex"), 0);
+        glUniform1i(glGetUniformLocation(g_geomProgram, "u_useNormalMap"), 0);
+
+        glDrawElements(GL_TRIANGLES, g_lightSphereIndexCount, GL_UNSIGNED_INT, 0);
+    }
 
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
+    // 2.5) SSAO pass
     if (g_enableSSAO) {
         glBindFramebuffer(GL_FRAMEBUFFER, g_ssaoFBO);
         glViewport(0, 0, g_ssaoWidth, g_ssaoHeight);
@@ -1803,7 +2106,6 @@ static void on_display(GLFWwindow* window)
         glBindVertexArray(g_quadVAO);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         glBindVertexArray(0);
-
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
@@ -1887,23 +2189,24 @@ static void on_display(GLFWwindow* window)
     glUniform1f(glGetUniformLocation(g_lightProgram, "u_ssrThickness"), g_ssrThickness);
     glUniform1f(glGetUniformLocation(g_lightProgram, "u_ssrIntensity"), g_ssrIntensity);
 
+    // ----- area light basis & uniforms (before draw!) -----
+    {
+        glm::vec3 rectN, rectT, rectB;
+        buildAreaLightBasis(rectN, rectT, rectB);
+
+        glUniform3fv(glGetUniformLocation(g_lightProgram, "u_rectCenter"), 1, glm::value_ptr(g_areaCenter));
+        glUniform3fv(glGetUniformLocation(g_lightProgram, "u_rectNormal"), 1, glm::value_ptr(rectN));
+        glUniform3fv(glGetUniformLocation(g_lightProgram, "u_rectTangent"), 1, glm::value_ptr(rectT));
+        glUniform3fv(glGetUniformLocation(g_lightProgram, "u_rectBitangent"), 1, glm::value_ptr(rectB));
+        glUniform2fv(glGetUniformLocation(g_lightProgram, "u_rectSize"), 1, glm::value_ptr(g_areaSize));
+        glUniform3fv(glGetUniformLocation(g_lightProgram, "u_rectColor"), 1, glm::value_ptr(g_areaColor));
+        glUniform1i(glGetUniformLocation(g_lightProgram, "u_rectSamples"), g_areaSamples);
+        glUniform1i(glGetUniformLocation(g_lightProgram, "u_enableAreaLight"), g_enableAreaLight ? 1 : 0);
+    }
 
     glBindVertexArray(g_quadVAO);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
-
-    // ----- area light basis -----
-    glm::vec3 rectN, rectT, rectB;
-    buildAreaLightBasis(rectN, rectT, rectB);
-
-    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_rectCenter"), 1, glm::value_ptr(g_areaCenter));
-    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_rectNormal"), 1, glm::value_ptr(rectN));
-    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_rectTangent"), 1, glm::value_ptr(rectT));
-    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_rectBitangent"), 1, glm::value_ptr(rectB));
-    glUniform2fv(glGetUniformLocation(g_lightProgram, "u_rectSize"), 1, glm::value_ptr(g_areaSize));
-    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_rectColor"), 1, glm::value_ptr(g_areaColor));
-    glUniform1i(glGetUniformLocation(g_lightProgram, "u_rectSamples"), g_areaSamples);
-
 
     // 4) Blur bright texture (gaussian ping-pong)
     bool horizontal = true;
@@ -1930,6 +2233,78 @@ static void on_display(GLFWwindow* window)
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
+    // --- 4.5) Volumetric light scattering ("god rays") ---
+    glm::vec2 lightScreenPos(-1.0f, -1.0f);
+    bool doVol = g_enableVolumetric;
+
+    glm::vec3 volLightPos = g_useDemoVolLight ? g_volDemoLightPos : lightPos;
+
+
+    if (doVol)
+    {
+        // Use the demo sun when the checkbox is on,
+        // otherwise fall back to the point light sphere
+        glm::vec3 volLightWorld = g_useDemoVolLight ? g_volDemoLightPos : lightPos;
+
+        glm::vec4 clip = proj * view * glm::vec4(volLightWorld, 1.0f);
+        if (clip.w <= 0.0f) {
+            doVol = false;
+        }
+        else {
+            glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            lightScreenPos = glm::vec2(
+                ndc.x * 0.5f + 0.5f,
+                ndc.y * 0.5f + 0.5f
+            );
+            if (lightScreenPos.x < 0.0f || lightScreenPos.x > 1.0f ||
+                lightScreenPos.y < 0.0f || lightScreenPos.y > 1.0f)
+            {
+                doVol = false;
+            }
+        }
+    }
+
+    if (doVol) {
+        glBindFramebuffer(GL_FRAMEBUFFER, g_volumetricFBO);
+        glViewport(0, 0, display_w, display_h);
+        glDisable(GL_DEPTH_TEST);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        glUseProgram(g_volumetricProgram);
+                                                               
+        // IMPORTANT: now the scene buffer is from *this* frame
+        glActiveTexture(GL_TEXTURE0);
+        //glBindTexture(GL_TEXTURE_2D, g_brightColorTex);
+        glBindTexture(GL_TEXTURE_2D, g_hdrColorTex);
+
+        glUniform1i(glGetUniformLocation(g_volumetricProgram, "u_scene"), 0);
+
+        glUniform2fv(glGetUniformLocation(g_volumetricProgram, "u_lightScreenPos"),
+            1, glm::value_ptr(lightScreenPos));
+        glUniform1i(glGetUniformLocation(g_volumetricProgram, "u_numSamples"), g_volNumSamples);
+        glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_exposure"), g_volExposure);
+        glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_decay"), g_volDecay);
+        glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_density"), g_volDensity);
+        glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_weight"), g_volWeight);
+
+        //glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_threshold"), 0.6f);
+
+        // Background key color
+        glm::vec3 bg(0.19f, 0.19f, 0.19f);  // from the spec
+        glUniform3fv(glGetUniformLocation(g_volumetricProgram, "u_bgColor"),
+            1, glm::value_ptr(bg));
+
+
+        glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_threshold"), g_volThreshold);
+        /*glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_sourceRadius"), g_volSourceRadius);*/
+
+        glBindVertexArray(g_quadVAO);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glBindVertexArray(0);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+
     // 5) Final combine: HDR scene + blurred bloom -> default framebuffer
     glViewport(0, 0, display_w, display_h);
 
@@ -1950,9 +2325,27 @@ static void on_display(GLFWwindow* window)
     glBindTexture(GL_TEXTURE_2D, blurredTex);
     glUniform1i(glGetUniformLocation(g_finalProgram, "u_bloomBlur"), 1);
 
-    glUniform1i(glGetUniformLocation(g_finalProgram, "u_enableBloom"), g_enableBloom ? 1 : 0);
-    glUniform1f(glGetUniformLocation(g_finalProgram, "u_bloomIntensity"), g_bloomIntensity);
-    glUniform1f(glGetUniformLocation(g_finalProgram, "u_exposure"), g_exposure);
+    // Volumetric texture (may be empty if disabled/off-screen)
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, g_volumetricTex);
+    glUniform1i(glGetUniformLocation(g_finalProgram, "u_volumetric"), 2);
+
+    glUniform1i(glGetUniformLocation(g_finalProgram, "u_enableBloom"),
+        g_enableBloom ? 1 : 0);
+
+    glUniform1i(glGetUniformLocation(g_finalProgram, "u_enableVolumetric"),
+        g_enableVolumetric ? 1 : 0);
+
+
+    glUniform1f(glGetUniformLocation(g_finalProgram, "u_bloomIntensity"),
+        g_bloomIntensity);
+
+    glUniform1f(glGetUniformLocation(g_finalProgram, "u_volumetricIntensity"),
+        g_volIntensity);
+
+    glUniform1f(glGetUniformLocation(g_finalProgram, "u_exposure"),
+        g_exposure);
+
 
     glBindVertexArray(g_quadVAO);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -2013,14 +2406,32 @@ static void on_gui()
     ImGui::SliderFloat("SSR Step", &g_ssrStep, 0.05f, 0.5f);
     ImGui::SliderFloat("SSR Thickness", &g_ssrThickness, 0.01f, 0.4f);
 
-    
     ImGui::Separator();
     ImGui::Text("Rectangular Area Light");
+    ImGui::Checkbox("Enable Area Light", &g_enableAreaLight);
     ImGui::DragFloat3("Center", &g_areaCenter.x, 0.01f);
     ImGui::DragFloat2("Size (W,H)", &g_areaSize.x, 0.01f, 0.01f, 5.0f);
     ImGui::DragFloat3("Euler (pitch,yaw,roll)", &g_areaEuler.x, 0.5f, -180.0f, 180.0f);
     ImGui::ColorEdit3("Area Color", &g_areaColor.x);
     ImGui::SliderInt("Samples", &g_areaSamples, 1, 32);
+
+    ImGui::Separator();
+    ImGui::Text("Volumetric Light (God Rays)");
+    ImGui::Checkbox("Enable Volumetric", &g_enableVolumetric);
+    ImGui::SliderFloat("Vol Intensity", &g_volIntensity, 0.0f, 5.0f);
+    ImGui::SliderInt("Vol Samples", &g_volNumSamples, 10, 200);
+    ImGui::SliderFloat("Vol Exposure", &g_volExposure, 0.0f, 1.0f);
+    ImGui::SliderFloat("Vol Decay", &g_volDecay, 0.90f, 1.0f);
+    ImGui::SliderFloat("Vol Density", &g_volDensity, 0.1f, 2.0f);
+    ImGui::SliderFloat("Vol Weight", &g_volWeight, 0.0f, 2.0f);
+    // NEW: demo sun light
+    ImGui::Separator();
+    ImGui::Text("Volumetric Demo Light");
+    ImGui::Checkbox("Use demo light pos", &g_useDemoVolLight);
+    ImGui::Checkbox("Show demo light sphere", &g_showVolDemoSphere);
+    ImGui::DragFloat3("Demo light world pos", &g_volDemoLightPos.x, 0.05f);
+    ImGui::SliderFloat("Vol Source radius", &g_volSourceRadius, 0.0f, 0.3f);
+    ImGui::SliderFloat("Vol Threshold", &g_volThreshold, 0.0f, 2.0f);
 
 
     ImGui::Separator();
@@ -2183,10 +2594,14 @@ int main(int, char**)
     g_finalProgram = createProgram(kLightVertexShader, kFinalFragmentShader);
     g_depthProgram = createProgram(kDepthVertexShader, kDepthFragmentShader);
     g_ssaoProgram = createProgram(kLightVertexShader, kSSAOFragmentShader);
+    g_volumetricProgram = createProgram(kLightVertexShader, kVolumetricFragmentShader);
+
+
     initSSAOKernelAndNoise();
     initShadowMap();
     initFullscreenQuad();
     initLightSphere();
+    initAreaRectMesh();
 
     int fbw, fbh;
     glfwGetFramebufferSize(window, &fbw, &fbh);
@@ -2262,6 +2677,18 @@ int main(int, char**)
     if (g_ssaoNoiseTex) glDeleteTextures(1, &g_ssaoNoiseTex);
     if (g_ssaoFBO)      glDeleteFramebuffers(1, &g_ssaoFBO);
     if (g_ssaoProgram)  glDeleteProgram(g_ssaoProgram);
+
+    if (g_lightSphereEBO) glDeleteBuffers(1, &g_lightSphereEBO);
+    if (g_lightSphereVBO) glDeleteBuffers(1, &g_lightSphereVBO);
+    if (g_lightSphereVAO) glDeleteVertexArrays(1, &g_lightSphereVAO);
+
+    if (g_areaRectEBO) glDeleteBuffers(1, &g_areaRectEBO);
+    if (g_areaRectVBO) glDeleteBuffers(1, &g_areaRectVBO);
+    if (g_areaRectVAO) glDeleteVertexArrays(1, &g_areaRectVAO);
+
+    if (g_volumetricTex)   glDeleteTextures(1, &g_volumetricTex);
+    if (g_volumetricFBO)   glDeleteFramebuffers(1, &g_volumetricFBO);
+    if (g_volumetricProgram) glDeleteProgram(g_volumetricProgram);
 
 
     ImGui_ImplOpenGL3_Shutdown();
