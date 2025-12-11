@@ -4,7 +4,9 @@
 
 SceneRenderer::SceneRenderer()
 {
-	m_debugView = 0; 
+	m_debugView = 0;     
+	m_filterMode = 0;
+    m_useNormalMapping = true;
 }
 
 
@@ -14,6 +16,7 @@ SceneRenderer::~SceneRenderer()
 void SceneRenderer::startNewFrame() {
 	this->m_shaderProgram->useProgram();
 	glUniform1i(10, m_filterMode);
+	glUniform1i(11, m_useNormalMapping ? 1 : 0);
  	this->clear();
 }
 void SceneRenderer::renderPass(){

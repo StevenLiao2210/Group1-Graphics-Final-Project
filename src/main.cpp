@@ -34,6 +34,7 @@ int displayWidth;
 int displayHeight;
 
 int g_filterView = 0;
+bool g_enableNormalMapping = true;
 
 double cursorPos[2];
 
@@ -273,8 +274,16 @@ bool on_init(int displayWidth, int displayHeight)
 	g_magicRockObj = createDynamicObjFromObj("assets/outdoor/MagicRock/magicRock.obj");
 	if (g_magicRockObj){
 		GLuint rockTexture = createTextureFromFile("assets/outdoor/MagicRock/StylMagicRocks_AlbedoTransparency.png");
+		
 		g_magicRockObj->setAlbedoTexture(rockTexture);
-		g_magicRockObj->setPixelFunctionId(SceneManager::Instance()->m_fs_terrainPass);
+		g_magicRockObj->setPixelFunctionId(SceneManager::Instance()->m_fs_blinnPhongObject);
+		
+		// normal mapping
+		GLuint rockNormalTex = createTextureFromFile("assets/outdoor/MagicRock/StylMagicRocks_NormalOpenGL.png");
+		g_magicRockObj->setNormalTexture(rockNormalTex);
+		g_magicRockObj->setUseNormalMapping(true);
+		
+		
 		defaultRenderer->appendDynamicSceneObject(g_magicRockObj);
 	}
 
@@ -439,6 +448,7 @@ inline void on_display()
 	// =============================================
     // start rendering
 	defaultRenderer->setFilterMode(g_filterView);
+	defaultRenderer->setUseNormalMapping(g_enableNormalMapping);
 
     // start new frame
     defaultRenderer->setViewport(0, 0, displayWidth, displayHeight);
@@ -465,7 +475,7 @@ inline void on_gui()
 	ImGui::Begin("Information");
 	m_imguiPanel->update();
 
-	// filrer switch
+	// filter switch
     ImGui::Separator();
     ImGui::Text("Filter");
 
@@ -474,6 +484,11 @@ inline void on_gui()
 	ImGui::RadioButton("World space normal", &g_filterView, 2);
 	ImGui::RadioButton("Diffuse", &g_filterView, 3);
 	ImGui::RadioButton("Specular", &g_filterView, 4);
+
+	// ormal mapping 
+	ImGui::Separator();
+	ImGui::Text("Effects");
+	ImGui::Checkbox("Enable normal mapping", &g_enableNormalMapping);
 
     ImGui::End();
 }

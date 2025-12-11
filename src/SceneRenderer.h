@@ -21,6 +21,7 @@ private:
 	int m_frameHeight;	
 	int m_debugView;
 	int m_filterMode = 0;
+	bool m_useNormalMapping = true;
 
 	std::vector<DynamicSceneObject*> m_dynamicSOs;
 	TerrainSceneObject* m_terrainSO = nullptr;
@@ -45,6 +46,8 @@ public:
     int  debugView() const;
 	void setFilterMode(int mode) { m_filterMode = mode; }
     int  filterMode() const { return m_filterMode; }
+
+	void setUseNormalMapping(bool v) { m_useNormalMapping = v; }
 
 private:
 	void clear(const glm::vec4 &clearColor = glm::vec4(0.0, 0.0, 0.0, 1.0), const float depth = 1.0);

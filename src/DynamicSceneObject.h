@@ -23,6 +23,11 @@ private:
 	//per object albedo texture
 	GLuint m_albedoTexHandle = 0;
 
+	// normal mapping
+	GLuint m_normalTex = 0;    
+    bool   m_useNormalMapping = false; 
+
+
 public:
 	DynamicSceneObject(const int maxNumVertex, const int maxNumIndex, const bool normalFlag, const bool uvFlag);
 	virtual ~DynamicSceneObject();
@@ -40,5 +45,9 @@ public:
 	void setModelMat(const glm::mat4& modelMat);
 
 	void setAlbedoTexture(GLuint tex);
+	// normal mapping
+	void setNormalTexture(GLuint tex) { m_normalTex = tex; }
+    void setUseNormalMapping(bool v) { m_useNormalMapping = v; }
+	GLuint normalTexture() const      { return m_normalTex; }
 };
 

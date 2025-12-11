@@ -69,6 +69,19 @@ void DynamicSceneObject::update() {
 		glBindTexture(GL_TEXTURE_2D, m_albedoTexHandle);
 	}
 
+	// normal mapping
+	SceneManager* manager = SceneManager::Instance();
+
+	if (m_useNormalMapping && m_normalTex != 0) {
+		glActiveTexture(manager->m_normalTexUnit);
+		glBindTexture(GL_TEXTURE_2D, m_normalTex);
+		glUniform1i(manager->m_normalMapHandle, manager->m_normalMapTexIdx);
+	} else {
+		glActiveTexture(manager->m_normalTexUnit);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		glUniform1i(manager->m_normalMapHandle, manager->m_normalMapTexIdx);
+	}
+
 	glUniform1i(SceneManager::Instance()->m_fs_pixelProcessIdHandle, this->m_pixelFunctionId);
 	glDrawElements(this->m_primitive, this->m_indexCount, GL_UNSIGNED_INT, nullptr);
 }

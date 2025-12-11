@@ -16,6 +16,12 @@ layout(location = 4) uniform sampler2D albedoTexture;
 
 layout(location = 10) uniform int filterMode;
 
+// NEW: normal mapping
+layout(location = 6)  uniform sampler2D normalMap; 
+layout(location = 11) uniform int useNormalMapping;
+layout(location = 0)  uniform mat4 modelMat;
+layout(location = 7)  uniform mat4 viewMat;
+
 
 vec4 withFog(vec4 color) {
     const vec4  FOG_COLOR = vec4(0.0, 0.0, 0.0, 1.0);
@@ -62,8 +68,8 @@ vec4 specularFilter() {
 
 
 // Generic Blinn-Phong using view-space N, V, light dir
-vec4 blinnPhong(vec4 baseColor) {
-    vec3 N = normalize(f_viewNormal);
+vec4 blinnPhong(vec4 baseColor, vec3 N_in) {
+    vec3 N = normalize(N_in);
     vec3 V = normalize(-f_viewVertex);           // camera at origin in view space
 
     // simple directional light in view space
@@ -87,7 +93,7 @@ vec4 blinnPhong(vec4 baseColor) {
 // Terrain pass: textured + Blinn-Phong + fog
 void terrainPass() {
     vec4 texel = texture(albedoTexture, f_uv.xy);
-    vec4 lit   = blinnPhong(texel);
+    vec4 lit   = blinnPhong(texel, f_viewNormal);
     fragColor  = withFog(lit);
     fragColor.a = 1.0;
 }
@@ -99,11 +105,31 @@ void pureColor() {
 
 // Dynamic objects: solid color + Blinn-Phong + fog
 void blinnPhongObject() {
-    vec4 base = vec4(1.0, 0.3, 0.2, 1.0);  // tweak if you like
-    vec4 lit  = blinnPhong(base);
+
+    vec4 base = texture(albedoTexture, f_uv.xy);
+
+    vec3 N_geom = normalize(f_viewNormal);
+    vec3 N = N_geom;
+
+    if (useNormalMapping == 1) {
+
+        vec3 n_ts = texture(normalMap, f_uv.xy).rgb;
+        n_ts = n_ts * 2.0 - 1.0;
+
+        vec3 up = (abs(N_geom.z) < 0.999) ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+        vec3 T = normalize(cross(up, N_geom));
+        vec3 B = cross(N_geom, T);
+        mat3 TBN = mat3(T, B, N_geom);
+
+        vec3 N_bump = normalize(TBN * n_ts);
+
+        float strength = 0.5;  // 可以試 0.3 ~ 0.7 調整感覺
+        N = normalize(mix(N_geom, N_bump, strength));
+    }
+
+    vec4 lit  = blinnPhong(base, N);
     fragColor = withFog(lit);
 }
-
 void main() {
 
     if (filterMode == 1) {
