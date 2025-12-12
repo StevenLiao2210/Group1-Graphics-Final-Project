@@ -20,6 +20,11 @@ void SceneRenderer::startNewFrame() {
  	this->clear();
 }
 void SceneRenderer::renderPass(){
+	// Ensure we're using the correct shader program for standard rendering
+	this->m_shaderProgram->useProgram();
+	glUniform1i(10, m_filterMode);
+	glUniform1i(11, m_useNormalMapping ? 1 : 0);
+	
 	SceneManager *manager = SceneManager::Instance();	
 
 	glUniformMatrix4fv(manager->m_projMatHandle, 1, false, glm::value_ptr(this->m_projMat));

@@ -4,6 +4,7 @@
 #include <imgui_impl_opengl3.h>
 #include <cstdio>
 #include <iostream>
+#include <chrono>
 #define GLM_ENABLE_EXPERIMENTAL
 #include <GLFW/glfw3.h>
 
@@ -14,6 +15,8 @@
 #include "ViewFrustumSceneObject.h"
 #include "terrain\MyTerrain.h"
 #include "MyCameraManager.h"
+#include "IndirectRenderer.h"
+#include "MyPoissonSample.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -30,11 +33,21 @@ const int INIT_HEIGHT = 512;
 // You can probably tell these come from class members,
 // but let's make them global for clarity—especially for those less familiar with C++ OOP.
 
+extern "C" {
+	__declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+	__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+
 int displayWidth;
 int displayHeight;
 
 int g_filterView = 0;
 bool g_enableNormalMapping = true;
+bool g_enableCulling = true;
+bool g_collectInstanceStats = false;
+float g_cullDistanceThreshold = 5.0f;
+int g_cullFrameInterval = 2;
+float g_instanceMaxDistance = 250.0f;
 
 double cursorPos[2];
 
@@ -49,9 +62,60 @@ INANOA::MyCameraManager* m_myCameraManager = nullptr;
 DynamicSceneObject* g_airplaneObj = nullptr;
 DynamicSceneObject* g_magicRockObj = nullptr;
 
+// === Indirect instanced renderer for foliage and buildings ===
+IndirectRenderer* g_indirectRenderer = nullptr;
+
 // ==============================================
 
 void resize_impl(int w, int h);
+
+struct CpuTimer {
+	std::chrono::steady_clock::time_point start;
+	void begin() { start = std::chrono::steady_clock::now(); }
+	double end() const {
+		auto stop = std::chrono::steady_clock::now();
+		return std::chrono::duration<double, std::milli>(stop - start).count();
+	}
+};
+
+struct GpuTimer {
+	GLuint queries[2] = { 0, 0 };
+	int writeIndex = 0;
+	bool initialized = false;
+	bool active = false;
+	double lastMs = 0.0;
+
+	void ensureInit() {
+		if (queries[0] == 0) {
+			glGenQueries(2, queries);
+		}
+	}
+
+	void begin() {
+		ensureInit();
+		glBeginQuery(GL_TIME_ELAPSED, queries[writeIndex]);
+		active = true;
+	}
+
+	void end() {
+		if (!active) {
+			return;
+		}
+		glEndQuery(GL_TIME_ELAPSED);
+		int readIndex = 1 - writeIndex;
+		if (initialized) {
+			GLuint64 ns = 0;
+			glGetQueryObjectui64v(queries[readIndex], GL_QUERY_RESULT, &ns);
+			lastMs = static_cast<double>(ns) / 1'000'000.0;
+		} else {
+			initialized = true;
+		}
+		writeIndex = readIndex;
+		active = false;
+	}
+
+	double milliseconds() const { return lastMs; }
+};
 
 // === Load an OBJ and build a DynamicSceneObjcet (position (3) + normal(3) + uv (3)) ===
 static DynamicSceneObject* createDynamicObjFromObj(const std::string& objPath)
@@ -287,6 +351,96 @@ bool on_init(int displayWidth, int displayHeight)
 		defaultRenderer->appendDynamicSceneObject(g_magicRockObj);
 	}
 
+	// =================================================================
+	// === Initialize Indirect Instanced Renderer for Foliage and Buildings ===
+	g_indirectRenderer = new IndirectRenderer();
+	if (!g_indirectRenderer->initialize()) {
+		std::cerr << "Failed to initialize IndirectRenderer!" << std::endl;
+		return false;
+	}
+
+	// Load foliage meshes (grass and bushes with alpha)
+	int grassIdx = g_indirectRenderer->loadMesh(
+		"assets/outdoor/grassB.obj",
+		"assets/outdoor/grassB_albedo.png",
+		"",  // no normal map
+		true  // has alpha
+	);
+
+	int bush01Idx = g_indirectRenderer->loadMesh(
+		"assets/outdoor/bush01_lod2.obj",
+		"assets/outdoor/bush01.png",
+		"",  // no normal map
+		true  // has alpha
+	);
+
+	int bush05Idx = g_indirectRenderer->loadMesh(
+		"assets/outdoor/bush05_lod2.obj",
+		"assets/outdoor/bush05.png",
+		"",  // no normal map
+		true  // has alpha
+	);
+
+	// Load building meshes
+	int building1Idx = g_indirectRenderer->loadMesh(
+		"assets/outdoor/Medieval_Building_LowPoly/medieval_building_lowpoly_1.obj",
+		"assets/outdoor/Medieval_Building_LowPoly/Medieval_Building_LowPoly_V1_Albedo_small.png",
+		"",  // no normal map
+		false  // no alpha
+	);
+
+	int building2Idx = g_indirectRenderer->loadMesh(
+		"assets/outdoor/Medieval_Building_LowPoly/medieval_building_lowpoly_2.obj",
+		"assets/outdoor/Medieval_Building_LowPoly/Medieval_Building_LowPoly_V2_Albedo_small.png",
+		"",  // no normal map
+		false  // no alpha
+	);
+
+	// Load Poisson samples for placement
+	// Grass - large sample (621043 points)
+	MyPoissonSample* grassSample = MyPoissonSample::fromFile("assets/outdoor/poissonPoints_621043_after.ppd2");
+	if (grassSample && grassIdx >= 0) {
+		g_indirectRenderer->setInstances(grassIdx, grassSample, 0.0f, 0.8f, 1.2f, m_terrain->terrainData());
+		std::cout << "[Main] Loaded " << grassSample->m_numSample << " grass instances" << std::endl;
+	}
+
+	// Bushes - medium samples (2797 and 1010 points)
+	MyPoissonSample* bush01Sample = MyPoissonSample::fromFile("assets/outdoor/poissonPoints_2797.ppd2");
+	if (bush01Sample && bush01Idx >= 0) {
+		g_indirectRenderer->setInstances(bush01Idx, bush01Sample, 0.0f, 0.9f, 1.3f, m_terrain->terrainData());
+		std::cout << "[Main] Loaded " << bush01Sample->m_numSample << " bush01 instances" << std::endl;
+	}
+
+	MyPoissonSample* bush05Sample = MyPoissonSample::fromFile("assets/outdoor/poissonPoints_1010.ppd2");
+	if (bush05Sample && bush05Idx >= 0) {
+		g_indirectRenderer->setInstances(bush05Idx, bush05Sample, 0.0f, 0.9f, 1.3f, m_terrain->terrainData());
+		std::cout << "[Main] Loaded " << bush05Sample->m_numSample << " bush05 instances" << std::endl;
+	}
+
+	// Buildings - using city lots samples
+	MyPoissonSample* buildingSample0 = MyPoissonSample::fromFile("assets/outdoor/cityLots_sub_0.ppd2");
+	if (buildingSample0 && building1Idx >= 0) {
+		g_indirectRenderer->setInstances(building1Idx, buildingSample0, 0.0f, 1.0f, 1.0f, m_terrain->terrainData());
+		std::cout << "[Main] Loaded " << buildingSample0->m_numSample << " building1 instances" << std::endl;
+	}
+
+	MyPoissonSample* buildingSample1 = MyPoissonSample::fromFile("assets/outdoor/cityLots_sub_1.ppd2");
+	if (buildingSample1 && building2Idx >= 0) {
+		g_indirectRenderer->setInstances(building2Idx, buildingSample1, 0.0f, 1.0f, 1.0f, m_terrain->terrainData());
+		std::cout << "[Main] Loaded " << buildingSample1->m_numSample << " building2 instances" << std::endl;
+	}
+
+	// Finalize all instances (upload to GPU)
+	g_indirectRenderer->finalizeInstances();
+	g_indirectRenderer->setStatsCollectionEnabled(g_collectInstanceStats);
+
+	// Clean up Poisson samples (data is now on GPU)
+	delete grassSample;
+	delete bush01Sample;
+	delete bush05Sample;
+	delete buildingSample0;
+	delete buildingSample1;
+	// =================================================================
 
 	resize_impl(displayWidth, displayHeight);
 	m_imguiPanel = new MyImGuiPanel();
@@ -302,6 +456,7 @@ void on_destroy()
 	delete m_viewFrustumSO;
 	delete m_terrain;
 	delete m_imguiPanel;
+	delete g_indirectRenderer;
 	//ntoe: if we want to add new object, we also have to destroy it here
 	delete g_airplaneObj;
 	delete g_magicRockObj;
@@ -397,6 +552,18 @@ void on_resize(GLFWwindow* window, int w, int h)
 
 inline void on_display()
 {
+	static GpuTimer s_playerTerrainGpu;
+	static GpuTimer s_playerInstGpu;
+	static GpuTimer s_godTerrainGpu;
+	static GpuTimer s_godInstGpu;
+	static int s_perfFrameCounter = 0;
+	constexpr int PERF_LOG_INTERVAL = 60;
+
+	double playerTerrainCpuMs = 0.0;
+	double playerInstCpuMs = 0.0;
+	double godTerrainCpuMs = 0.0;
+	double godInstCpuMs = 0.0;
+
 	// update cameras and airplane
 
 	// god camera
@@ -449,22 +616,72 @@ inline void on_display()
     // start rendering
 	defaultRenderer->setFilterMode(g_filterView);
 	defaultRenderer->setUseNormalMapping(g_enableNormalMapping);
+	if (g_indirectRenderer) {
+		g_indirectRenderer->setCullingThrottle(g_cullDistanceThreshold, g_cullFrameInterval);
+		g_indirectRenderer->setMaxViewDistance(g_instanceMaxDistance);
+	}
 
     // start new frame
     defaultRenderer->setViewport(0, 0, displayWidth, displayHeight);
     defaultRenderer->startNewFrame();
 
-	// rendering with player view		
-	defaultRenderer->setViewport(playerViewport[0], playerViewport[1], playerViewport[2], playerViewport[3]);
-	defaultRenderer->setView(playerVM);
-	defaultRenderer->setProjection(playerProjMat);
-	defaultRenderer->renderPass();
+	// rendering with player view
+	{
+		CpuTimer cpuTimer;
+		cpuTimer.begin();
+		s_playerTerrainGpu.begin();
+		defaultRenderer->setViewport(playerViewport[0], playerViewport[1], playerViewport[2], playerViewport[3]);
+		defaultRenderer->setView(playerVM);
+		defaultRenderer->setProjection(playerProjMat);
+		defaultRenderer->renderPass();
+		s_playerTerrainGpu.end();
+		playerTerrainCpuMs = cpuTimer.end();
+	}
+	
+	// Render instanced foliage and buildings with player view (with culling)
+	if (g_indirectRenderer) {
+		CpuTimer cpuTimer;
+		cpuTimer.begin();
+		s_playerInstGpu.begin();
+		g_indirectRenderer->prepareCulling(playerVM, playerProjMat, playerViewOrg, g_enableCulling);
+		g_indirectRenderer->drawPrepared(playerVM, playerProjMat, g_filterView, g_enableNormalMapping);
+		s_playerInstGpu.end();
+		playerInstCpuMs = cpuTimer.end();
+	}
 
 	// rendering with god view
-	defaultRenderer->setViewport(godViewport[0], godViewport[1], godViewport[2], godViewport[3]);
-	defaultRenderer->setView(godVM);
-	defaultRenderer->setProjection(godProjMat);
-	defaultRenderer->renderPass();
+	{
+		CpuTimer cpuTimer;
+		cpuTimer.begin();
+		s_godTerrainGpu.begin();
+		defaultRenderer->setViewport(godViewport[0], godViewport[1], godViewport[2], godViewport[3]);
+		defaultRenderer->setView(godVM);
+		defaultRenderer->setProjection(godProjMat);
+		defaultRenderer->renderPass();
+		s_godTerrainGpu.end();
+		godTerrainCpuMs = cpuTimer.end();
+	}
+	
+	// Render instanced foliage and buildings with god view (no culling for god view)
+	if (g_indirectRenderer) {
+		CpuTimer cpuTimer;
+		cpuTimer.begin();
+		s_godInstGpu.begin();
+		g_indirectRenderer->drawPrepared(godVM, godProjMat, g_filterView, g_enableNormalMapping);
+		s_godInstGpu.end();
+		godInstCpuMs = cpuTimer.end();
+	}
+
+	++s_perfFrameCounter;
+	if (s_perfFrameCounter % PERF_LOG_INTERVAL == 0) {
+		auto logPerf = [](const char* label, double cpuMs, double gpuMs) {
+			std::cout << "[Perf] " << label << " CPU " << cpuMs << " ms | GPU " << gpuMs << " ms" << std::endl;
+		};
+		logPerf("Player terrain", playerTerrainCpuMs, s_playerTerrainGpu.milliseconds());
+		logPerf("Player instancing", playerInstCpuMs, s_playerInstGpu.milliseconds());
+		logPerf("God terrain", godTerrainCpuMs, s_godTerrainGpu.milliseconds());
+		logPerf("God instancing", godInstCpuMs, s_godInstGpu.milliseconds());
+	}
 	// ===============================
 }
 
@@ -485,10 +702,39 @@ inline void on_gui()
 	ImGui::RadioButton("Diffuse", &g_filterView, 3);
 	ImGui::RadioButton("Specular", &g_filterView, 4);
 
-	// ormal mapping 
+	// Normal mapping 
 	ImGui::Separator();
 	ImGui::Text("Effects");
 	ImGui::Checkbox("Enable normal mapping", &g_enableNormalMapping);
+
+	// GPU Culling options
+	ImGui::Separator();
+	ImGui::Text("GPU Instancing");
+	ImGui::Checkbox("Enable frustum culling", &g_enableCulling);
+	ImGui::SliderFloat("Re-cull distance", &g_cullDistanceThreshold, 0.0f, 50.0f, "%.1f m");
+	ImGui::SliderInt("Frame interval", &g_cullFrameInterval, 1, 60);
+	ImGui::SliderFloat("Max render distance", &g_instanceMaxDistance, 50.0f, 800.0f, "%.0f m");
+	ImGui::Checkbox("Collect culling stats (costly)", &g_collectInstanceStats);
+	if (g_indirectRenderer) {
+		g_indirectRenderer->setStatsCollectionEnabled(g_collectInstanceStats);
+		g_indirectRenderer->setMaxViewDistance(g_instanceMaxDistance);
+	}
+	
+	// Display instance statistics
+	if (g_indirectRenderer) {
+		ImGui::Text("Total instances: %d", g_indirectRenderer->getTotalInstanceCount());
+		if (g_collectInstanceStats) {
+			ImGui::Text("Visible instances: %d", g_indirectRenderer->getVisibleInstanceCount());
+			float cullPercentage = 0.0f;
+			if (g_indirectRenderer->getTotalInstanceCount() > 0) {
+				cullPercentage = 100.0f * (1.0f - (float)g_indirectRenderer->getVisibleInstanceCount() / 
+				                          (float)g_indirectRenderer->getTotalInstanceCount());
+			}
+			ImGui::Text("Culled: %.1f%%", cullPercentage);
+		} else {
+			ImGui::TextDisabled("Culling stats disabled");
+		}
+	}
 
     ImGui::End();
 }
