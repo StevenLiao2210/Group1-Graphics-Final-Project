@@ -574,8 +574,8 @@ uniform float       u_far;
 
 // ===== Directional shadow map =====
 uniform sampler2D u_dirShadowMap;
-uniform mat4      u_lightVP;      // light view-proj
-uniform vec3      u_lightDir;     // direction FROM surface TO light (world)
+uniform mat4      u_lightVP;       // light view-proj
+uniform vec3      u_lightDir;      // direction FROM surface TO light (world)
 uniform float     u_shadowStrength;
 uniform bool      u_enableShadows;
 
@@ -621,23 +621,28 @@ uniform float u_edgeDepthThreshold;
 uniform float u_edgeNormalThreshold;
 uniform float u_edgeStrength;
 
-
+// ------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------
 float toonQuantize(float x, int steps)
 {
     steps = max(steps, 1);
     x = clamp(x, 0.0, 1.0);
-    // map to {0, 1/(steps-1), ..., 1}
     float s = float(max(steps - 1, 1));
     return floor(x * s + 0.5) / s;
 }
 
-vec3 toonQuantize3(vec3 c, int steps)
+// For toon highlight (optional “banded” spec)
+float toonSpec(float specPow)
 {
-    return vec3(
-        toonQuantize(c.r, steps),
-        toonQuantize(c.g, steps),
-        toonQuantize(c.b, steps)
-    );
+    // specPow is already in [0,1] usually, but clamp anyway
+    float s = clamp(specPow, 0.0, 1.0);
+
+    // 2-band highlight: adjust thresholds to taste
+    // You can also do multiple bands with toonQuantize().
+    float hi = step(0.65, s);       // hard highlight
+    float mid = step(0.35, s) * (1.0 - hi); // mid highlight
+    return 0.0 + 0.5 * mid + 1.0 * hi;
 }
 
 // Sobel edge detection using depth + normal discontinuities
@@ -683,16 +688,13 @@ float sobelEdge(vec2 uv)
     }
 
     float magD = length(vec2(gxD, gyD));
-    float magN = length(gxN) + length(gyN); // normal discontinuity magnitude
+    float magN = length(gxN) + length(gyN);
 
     float eD = smoothstep(u_edgeDepthThreshold,  u_edgeDepthThreshold * 2.0, magD);
     float eN = smoothstep(u_edgeNormalThreshold, u_edgeNormalThreshold * 2.0, magN);
 
     return clamp(max(eD, eN), 0.0, 1.0);
 }
-
-
-
 
 // ---------- Directional shadow (2D) ----------
 float calcDirShadow(vec3 worldPos, vec3 N)
@@ -723,23 +725,16 @@ float calcDirShadow(vec3 worldPos, vec3 N)
 // ---------- Point shadow (cube) ----------
 float calcPointShadow(vec3 worldPos)
 {
-    // vector from light to fragment
     vec3 L = worldPos - u_lightPos;
     float currentDepth = length(L);
-
-    // closest depth stored in cube as [0..1] * u_far
     float closestDepth = texture(u_shadowCube, L).r * u_far;
 
-    // simple bias (tweak if acne/peter-panning)
     float bias = 0.03;
-
-    // shadow = 1 if in shadow
     return (currentDepth - bias > closestDepth) ? 1.0 : 0.0;
 }
 
-
-// ---------- Area light ----------
-vec3 evalRectAreaLight(vec3 pos, vec3 N, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
+// ---------- Area light (diffuse only, stable in HDR) ----------
+vec3 evalRectAreaLightDiffuse(vec3 pos, vec3 N, vec3 Kd)
 {
     const int MAX_SAMPLES = 32;
     int S = clamp(u_rectSamples, 1, MAX_SAMPLES);
@@ -748,10 +743,10 @@ vec3 evalRectAreaLight(vec3 pos, vec3 N, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
     float halfH = 0.5 * u_rectSize.y;
     float area  = u_rectSize.x * u_rectSize.y;
 
-    vec3 accum = vec3(0.0);
-
     int grid = int(ceil(sqrt(float(S))));
     int used = 0;
+
+    float accumG = 0.0;
 
     for (int j = 0; j < grid && used < S; ++j)
     for (int i = 0; i < grid && used < S; ++i, ++used)
@@ -773,17 +768,26 @@ vec3 evalRectAreaLight(vec3 pos, vec3 N, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
         float NdotL = max(dot(N, wi), 0.0);
         if (NdotL <= 0.0) continue;
 
+        // one-sided emitter: only if sample is visible from front
         float NL_light = max(dot(-u_rectNormal, wi), 0.0);
         if (NL_light <= 0.0) continue;
 
         float G = (NdotL * NL_light) / d2;
-        accum += G;
+
+        // Toon: quantize N·L contribution (NOT the final color)
+        if (u_enableToon) {
+            // Use the NdotL term; keep geometric term continuous
+            float q = toonQuantize(NdotL, u_toonSteps);
+            G *= (q / max(NdotL, 1e-6));
+        }
+
+        accumG += G;
     }
 
     if (used == 0) return vec3(0.0);
 
     float factor  = area / float(used);
-    vec3 radiance = u_rectColor * accum * factor;
+    vec3 radiance = u_rectColor * accumG * factor;
 
     return Kd * radiance;
 }
@@ -806,7 +810,6 @@ vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
     vec3 rayOrigin = pos + N * 0.02;
 
     float t = 0.1;
-    vec3 hitColor = vec3(0.0);
 
     for (int i = 0; i < u_ssrMaxSteps; ++i)
     {
@@ -845,7 +848,7 @@ vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
             float hitNs = max(hitNsRaw, 1.0);
 
             if (hitEmissive) {
-                hitColor = hitKd;
+                return hitKd;
             } else {
                 vec3 hN = normalize(sceneNormal);
                 vec3 Ld = normalize(u_lightDir);
@@ -858,14 +861,13 @@ vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
                 float ao2 = 1.0;
                 if (u_enableSSAO) ao2 = texture(u_ssaoTex, uv).r;
 
+                // Keep SSR lighting non-toon to avoid “banding in reflections”
                 vec3 ambient2  = (hitKa * hitKd) * u_Ia * ao2;
                 vec3 diffuse2  = u_Id * hitKd * NdotL2;
                 vec3 specular2 = (NdotL2 > 0.0) ? (u_Is * hitKs * pow(NdotH2, hitNs)) : vec3(0.0);
 
-                hitColor = ambient2 + diffuse2 + specular2;
+                return ambient2 + diffuse2 + specular2;
             }
-
-            return hitColor;
         }
 
         t += u_ssrStep;
@@ -874,8 +876,9 @@ vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
     return vec3(0.0);
 }
 
-
-// ==================== main ====================
+// ------------------------------------------------------------
+// main
+// ------------------------------------------------------------
 void main()
 {
     vec3 pos      = texture(gPosition, v_uv).xyz;
@@ -885,8 +888,9 @@ void main()
     vec4 specData = texture(gSpecular, v_uv);
     vec3 Ks       = specData.rgb;
     float NsRaw   = specData.a;
+
     bool  isEmissive = (NsRaw < 0.0);
-    float Ns      = max(NsRaw, 1.0);
+    float Ns = max(NsRaw, 1.0);
 
     if (pos == vec3(0.0)) {
         FragColor   = vec4(0.0);
@@ -905,7 +909,7 @@ void main()
         FragColor = vec4(vec3(aoDbg), 1.0); BrightColor = vec4(0.0); return;
     }
 
-    // Emissive
+    // Emissive (area rect / light spheres)
     if (isEmissive) {
         vec3 emissive = Kd;
         FragColor = vec4(emissive, 1.0);
@@ -920,28 +924,36 @@ void main()
     }
 
     vec3 N = normalize(normal);
+    vec3 V = normalize(u_eye - pos);
 
     float ao = 1.0;
     if (u_enableSSAO) ao = texture(u_ssaoTex, v_uv).r;
 
-    // Ambient
+    // Ambient (keep smooth even in toon)
     vec3 ambient = (Ka * Kd) * u_Ia * ao;
 
     float s = clamp(u_shadowStrength, 0.0, 1.0);
 
-    // ===== Point light (with cube shadow) =====
+    // --------------------------------------------------------
+    // Point light
+    // --------------------------------------------------------
     vec3 Lp = normalize(u_lightPos - pos);
-    vec3 V  = normalize(u_eye - pos);
     vec3 Hp = normalize(Lp + V);
 
     float NdotLp = max(dot(N, Lp), 0.0);
-    float NdotHp = max(dot(N, Hp), 0.0);
-    
-    float qLp = u_enableToon ? toonQuantize(NdotLp, u_toonSteps) : NdotLp;
+    float qLp    = u_enableToon ? toonQuantize(NdotLp, u_toonSteps) : NdotLp;
 
-    vec3 pointDiffuse  = u_Id * Kd * qLp;
-    vec3 pointSpecular = (NdotLp > 0.0) ? (u_Is * Ks * pow(NdotHp, Ns)) : vec3(0.0);
-    vec3 directPoint   = pointDiffuse + pointSpecular;
+    vec3 pointDiffuse = u_Id * Kd * qLp;
+
+    // Spec: normal or toon-banded
+    vec3 pointSpecular = vec3(0.0);
+    if (NdotLp > 0.0) {
+        float specPow = pow(max(dot(N, Hp), 0.0), Ns);
+        float specAmt = u_enableToon ? toonSpec(specPow) : specPow;
+        pointSpecular = u_Is * Ks * specAmt;
+    }
+
+    vec3 directPoint = pointDiffuse + pointSpecular;
 
     float dist = length(u_lightPos - pos);
     float attenuation = 1.0 / (u_attConst + u_attLinear * dist + u_attQuadratic * dist * dist);
@@ -951,50 +963,54 @@ void main()
     if (u_enableShadows) pointShadow = calcPointShadow(pos);
     vec3 pointWithShadow = directPoint * mix(s, 1.0, 1.0 - pointShadow);
 
-    // ===== Directional light (with 2D shadow map) =====
+    // --------------------------------------------------------
+    // Directional light
+    // --------------------------------------------------------
     vec3 Ld = normalize(u_lightDir);
     vec3 Hd = normalize(Ld + V);
 
     float NdotLd = max(dot(N, Ld), 0.0);
-    float NdotHd = max(dot(N, Hd), 0.0);
+    float qLd    = u_enableToon ? toonQuantize(NdotLd, u_toonSteps) : NdotLd;
 
-    float qLd = u_enableToon ? toonQuantize(NdotLd, u_toonSteps) : NdotLd;
+    vec3 dirDiffuse = u_Id * Kd * qLd;
 
-    vec3 dirDiffuse    = u_Id * Kd * qLd;
-    vec3 dirSpecular = (NdotLd > 0.0) ? (u_Is * Ks * pow(NdotHd, Ns)) : vec3(0.0);
-    vec3 directDir   = dirDiffuse + dirSpecular;
+    vec3 dirSpecular = vec3(0.0);
+    if (NdotLd > 0.0) {
+        float specPow = pow(max(dot(N, Hd), 0.0), Ns);
+        float specAmt = u_enableToon ? toonSpec(specPow) : specPow;
+        dirSpecular = u_Is * Ks * specAmt;
+    }
+
+    vec3 directDir = dirDiffuse + dirSpecular;
 
     float dirShadow = 0.0;
     if (u_enableShadows) dirShadow = calcDirShadow(pos, N);
     vec3 dirWithShadow = directDir * mix(s, 1.0, 1.0 - dirShadow);
 
-    // ===== Rect area light =====
+    // --------------------------------------------------------
+    // Rect area light (diffuse only)
+    // --------------------------------------------------------
     vec3 directArea = vec3(0.0);
     if (u_enableAreaLight) {
-        directArea = evalRectAreaLight(pos, N, Ka, Kd, Ks, NsRaw) * u_Id;
+        directArea = evalRectAreaLightDiffuse(pos, N, Kd) * u_Id;
     }
 
+    // Final lighting (HDR)
     vec3 lighting = ambient + pointWithShadow + dirWithShadow + directArea;
 
-    // ===== Toon shading (quantize final lighting) =====
-    if (u_enableToon) {
-        lighting = toonQuantize3(lighting, u_toonSteps);
-    }
-
-    // ===== Edge darkening =====
+    // Edge darkening (post-light)
     if (u_enableEdges) {
         float e = sobelEdge(v_uv);
-        lighting *= (1.0 - e * u_edgeStrength); // black contour
+        lighting *= (1.0 - e * u_edgeStrength);
     }
 
-
-    // SSR on floor
+    // SSR (apply after edges; don’t toon-quantize SSR itself)
     if (u_enableSSR && isFloorPixel(pos, normal)) {
         vec3 refl = computeSSR(pos, normal, Ka, Kd, Ks, NsRaw);
         lighting = mix(lighting, refl, u_ssrIntensity);
     }
 
-    // Bloom bright-pass
+    // Bloom bright-pass (use HDR lighting)
     vec3 bright = vec3(0.0);
     if (u_enableBloom) {
         float b = max(max(lighting.r, lighting.g), lighting.b);
@@ -1005,6 +1021,7 @@ void main()
     BrightColor = vec4(bright, 1.0);
 }
 )";
+
 
 
 
