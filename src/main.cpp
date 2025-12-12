@@ -46,6 +46,31 @@ GLuint g_depthProgram = 0; // shadow-map depth pass
 GLuint g_blurProgram = 0; // gaussian blur for bloom
 GLuint g_finalProgram = 0; // final combine pass
 
+
+// ==============================
+// Directional shadow mapping
+// ==============================
+GLuint g_dirShadowFBO = 0;
+GLuint g_dirShadowTex = 0;
+const int DIR_SHADOW_SIZE = 1024;
+
+glm::mat4 g_lightVP = glm::mat4(1.0f); // light view-projection for directional shadow
+
+GLuint g_dirDepthProgram = 0;
+
+// ==============================
+// Directional light camera (NEW / separate feature)
+// ==============================
+glm::vec3 g_dirLightEye = glm::vec3(-2.845f, 2.028f, -1.293f);
+glm::vec3 g_dirLightCenter = glm::vec3(0.542f, -0.141f, -0.422f);
+glm::vec3 g_dirLightUp = glm::vec3(0.0f, 1.0f, 0.0f);
+
+float g_dirLightNear = 0.1f;
+float g_dirLightFar = 10.0f;
+float g_dirLightRange = 5.0f;
+
+glm::mat4 g_dirLightVP = glm::mat4(1.0f);
+
 // Shadow mapping globals
 GLuint g_shadowFBO = 0;
 GLuint g_shadowTex = 0;
@@ -56,8 +81,9 @@ const float g_pointShadowFar = 10.0f;
 
 glm::mat4 g_pointShadowMatrices[6];
 
-// Directional light camera (from spec)
-glm::vec3 g_lightEye = glm::vec3(1.87659f, 0.4625f, 0.103928f);
+// point light
+//glm::vec3 g_lightEye = glm::vec3(1.87659f, 0.4625f, 0.103928f);
+glm::vec3 g_pointLightPos = glm::vec3(1.87659f, 0.4625f, 0.103928f);
 glm::vec3 g_lightCenter = glm::vec3(0.0f, 0.5f, 0.0f);
 glm::vec3 g_lightUp = glm::vec3(0.0f, 1.0f, 0.0f);
 float     g_lightNear = 0.1f;
@@ -121,7 +147,7 @@ int    g_bloomWidth = 0;
 int    g_bloomHeight = 0;
 
 bool   g_enableBloom = true;
-float  g_bloomThreshold = 1.0f;
+float  g_bloomThreshold = 0.8f;
 float  g_bloomIntensity = 0.8f;
 float  g_exposure = 1.5f;
 int    g_blurIterations = 10;
@@ -179,7 +205,7 @@ std::vector<Mesh> g_meshes;
 // ==============================
 glm::vec3 g_areaCenter = glm::vec3(1.0f, 0.5f, -0.5f); // given
 glm::vec2 g_areaSize = glm::vec2(1.0f, 1.0f);        // width, height
-glm::vec3 g_areaEuler = glm::vec3(0.0f, 0.0f, 0.0f);  // pitch, yaw, roll in deg
+glm::vec3 g_areaEuler = glm::vec3(180.0f, 0.0f, 0.0f);  // pitch, yaw, roll in deg
 glm::vec3 g_areaColor = glm::vec3(0.8f, 0.6f, 0.0f);  // given color
 int       g_areaSamples = 16;                          // 4x4 stratified samples
 bool      g_enableAreaLight = true;
@@ -193,7 +219,7 @@ int    g_volWidth = 0;
 int    g_volHeight = 0;
 GLuint g_volumetricProgram = 0;
 
-bool  g_enableVolumetric = true;
+bool  g_enableVolumetric = false;
 int   g_volNumSamples = 100;      // demo spec
 float g_volExposure = 0.2f;     // exposure in formula
 float g_volDecay = 0.96815f; // decay
@@ -212,6 +238,49 @@ glm::vec3 g_volDemoLightPos(
     -1.293f * 5.0f
 );
 bool      g_showVolDemoSphere = true;
+
+
+// ==============================
+// NPR / Toon shading + Edges
+// ==============================
+bool  g_enableToon = true;
+int   g_toonSteps = 3;     // spec says 3
+bool  g_enableEdges = true;
+
+float g_edgeDepthThreshold = 0.08f; // tune
+float g_edgeNormalThreshold = 0.35f; // tune
+float g_edgeStrength = 1.0f;         // 0..1
+
+
+static void initDirectionalShadowMap()
+{
+    glGenFramebuffers(1, &g_dirShadowFBO);
+
+    glGenTextures(1, &g_dirShadowTex);
+    glBindTexture(GL_TEXTURE_2D, g_dirShadowTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24,
+        DIR_SHADOW_SIZE, DIR_SHADOW_SIZE, 0,
+        GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    // Crucial for directional shadows at edges:
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    float border[4] = { 1,1,1,1 }; // outside = lit (depth = 1)
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, g_dirShadowFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, g_dirShadowTex, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        std::cerr << "ERROR: Directional shadow FBO not complete!\n";
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
 
 
 // ==============================
@@ -357,6 +426,20 @@ static GLuint createProgram(const char* vsSrc, const char* fsSrc)
 // Shaders
 // ==============================
 
+static const char* kDirDepthVS = R"(#version 410 core
+layout(location = 0) in vec3 a_pos;
+uniform mat4 u_model;
+uniform mat4 u_lightVP;
+void main()
+{
+    gl_Position = u_lightVP * u_model * vec4(a_pos, 1.0);
+}
+)";
+
+static const char* kDirDepthFS = R"(#version 410 core
+void main() { }
+)";
+
 // Geometry pass: output world-pos, world-normal, ambient, diffuse, specular
 static const char* kGeomVertexShader = R"(#version 410 core
 layout(location = 0) in vec3 a_pos;
@@ -475,7 +558,7 @@ uniform sampler2D gSpecular;
 
 // Camera & light
 uniform vec3 u_eye;
-uniform vec3 u_lightPos;
+uniform vec3 u_lightPos;   // point light position
 uniform vec3 u_Ia;
 uniform vec3 u_Id;
 uniform vec3 u_Is;
@@ -485,11 +568,16 @@ uniform float u_attConst;
 uniform float u_attLinear;
 uniform float u_attQuadratic;
 
-// Point light shadow cube
+// ===== Point shadow cube =====
 uniform samplerCube u_shadowCube;
 uniform float       u_far;
-uniform float       u_shadowStrength;
-uniform bool        u_enableShadows;
+
+// ===== Directional shadow map =====
+uniform sampler2D u_dirShadowMap;
+uniform mat4      u_lightVP;      // light view-proj
+uniform vec3      u_lightDir;     // direction FROM surface TO light (world)
+uniform float     u_shadowStrength;
+uniform bool      u_enableShadows;
 
 // Bloom
 uniform bool  u_enableBloom;
@@ -514,22 +602,146 @@ uniform vec3 u_rectCenter;
 uniform vec3 u_rectNormal;
 uniform vec3 u_rectTangent;
 uniform vec3 u_rectBitangent;
-uniform vec2 u_rectSize;       // full width/height in world units
+uniform vec2 u_rectSize;       // full width/height
 uniform vec3 u_rectColor;
-uniform int  u_rectSamples;    // how many samples we’ll use
-uniform bool u_enableAreaLight; 
+uniform int  u_rectSamples;
+uniform bool u_enableAreaLight;
 
 // Debug view mode:
 // 0 = lighting, 1 = pos, 2 = normal, 3 = ambient,
-// 4 = diffuse, 5 = specular
+// 4 = diffuse, 5 = specular, 6 = SSAO
 uniform int u_viewMode;
 
-vec3 evalRectAreaLight(vec3 pos, vec3 N,
-                       vec3 Ka, vec3 Kd, vec3 Ks,
-                       float NsRaw)
+// ===== Toon / NPR =====
+uniform bool u_enableToon;
+uniform int  u_toonSteps;
+
+uniform bool  u_enableEdges;
+uniform float u_edgeDepthThreshold;
+uniform float u_edgeNormalThreshold;
+uniform float u_edgeStrength;
+
+
+float toonQuantize(float x, int steps)
 {
-    // one-sided Lambertian emitter
-    const int MAX_SAMPLES = 32; // safety; will clamp u_rectSamples
+    steps = max(steps, 1);
+    x = clamp(x, 0.0, 1.0);
+    // map to {0, 1/(steps-1), ..., 1}
+    float s = float(max(steps - 1, 1));
+    return floor(x * s + 0.5) / s;
+}
+
+vec3 toonQuantize3(vec3 c, int steps)
+{
+    return vec3(
+        toonQuantize(c.r, steps),
+        toonQuantize(c.g, steps),
+        toonQuantize(c.b, steps)
+    );
+}
+
+// Sobel edge detection using depth + normal discontinuities
+float sobelEdge(vec2 uv)
+{
+    vec2 texel = 1.0 / vec2(textureSize(gNormal, 0));
+
+    vec2 o[9] = vec2[](
+        vec2(-1,-1), vec2(0,-1), vec2(1,-1),
+        vec2(-1, 0), vec2(0, 0), vec2(1, 0),
+        vec2(-1, 1), vec2(0, 1), vec2(1, 1)
+    );
+
+    float kx[9] = float[](
+        -1, 0, 1,
+        -2, 0, 2,
+        -1, 0, 1
+    );
+    float ky[9] = float[](
+        -1,-2,-1,
+         0, 0, 0,
+         1, 2, 1
+    );
+
+    float gxD = 0.0, gyD = 0.0;
+    vec3  gxN = vec3(0.0);
+    vec3  gyN = vec3(0.0);
+
+    for (int i = 0; i < 9; ++i)
+    {
+        vec2 suv = uv + o[i] * texel;
+
+        vec3 p = texture(gPosition, suv).xyz;
+        vec3 n = texture(gNormal,   suv).xyz;
+
+        float d = (p == vec3(0.0)) ? 1e6 : length(p - u_eye);
+
+        gxD += d * kx[i];
+        gyD += d * ky[i];
+
+        gxN += n * kx[i];
+        gyN += n * ky[i];
+    }
+
+    float magD = length(vec2(gxD, gyD));
+    float magN = length(gxN) + length(gyN); // normal discontinuity magnitude
+
+    float eD = smoothstep(u_edgeDepthThreshold,  u_edgeDepthThreshold * 2.0, magD);
+    float eN = smoothstep(u_edgeNormalThreshold, u_edgeNormalThreshold * 2.0, magN);
+
+    return clamp(max(eD, eN), 0.0, 1.0);
+}
+
+
+
+
+// ---------- Directional shadow (2D) ----------
+float calcDirShadow(vec3 worldPos, vec3 N)
+{
+    vec4 lp = u_lightVP * vec4(worldPos, 1.0);
+    vec3 ndc = lp.xyz / lp.w;
+    vec3 sc  = ndc * 0.5 + 0.5;
+
+    if (sc.x < 0.0 || sc.x > 1.0 || sc.y < 0.0 || sc.y > 1.0 || sc.z < 0.0 || sc.z > 1.0)
+        return 0.0;
+
+    float NdotL = max(dot(N, u_lightDir), 0.0);
+    float bias  = max(0.0025 * (1.0 - NdotL), 0.0005);
+
+    vec2 texelSize = 1.0 / vec2(textureSize(u_dirShadowMap, 0));
+    float shadow = 0.0;
+
+    for (int y = -1; y <= 1; ++y)
+    for (int x = -1; x <= 1; ++x)
+    {
+        float pcfDepth = texture(u_dirShadowMap, sc.xy + vec2(x,y) * texelSize).r;
+        shadow += (sc.z - bias > pcfDepth) ? 1.0 : 0.0;
+    }
+    shadow /= 9.0;
+    return shadow;
+}
+
+// ---------- Point shadow (cube) ----------
+float calcPointShadow(vec3 worldPos)
+{
+    // vector from light to fragment
+    vec3 L = worldPos - u_lightPos;
+    float currentDepth = length(L);
+
+    // closest depth stored in cube as [0..1] * u_far
+    float closestDepth = texture(u_shadowCube, L).r * u_far;
+
+    // simple bias (tweak if acne/peter-panning)
+    float bias = 0.03;
+
+    // shadow = 1 if in shadow
+    return (currentDepth - bias > closestDepth) ? 1.0 : 0.0;
+}
+
+
+// ---------- Area light ----------
+vec3 evalRectAreaLight(vec3 pos, vec3 N, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
+{
+    const int MAX_SAMPLES = 32;
     int S = clamp(u_rectSamples, 1, MAX_SAMPLES);
 
     float halfW = 0.5 * u_rectSize.x;
@@ -538,54 +750,45 @@ vec3 evalRectAreaLight(vec3 pos, vec3 N,
 
     vec3 accum = vec3(0.0);
 
-    // simple 4x4 (up to 32) stratified pattern, no RNG needed
     int grid = int(ceil(sqrt(float(S))));
     int used = 0;
 
     for (int j = 0; j < grid && used < S; ++j)
+    for (int i = 0; i < grid && used < S; ++i, ++used)
     {
-        for (int i = 0; i < grid && used < S; ++i, ++used)
-        {
-            // [0,1] in cell, then [-0.5,0.5] across rectangle
-            float u = (float(i) + 0.5) / float(grid) - 0.5;
-            float v = (float(j) + 0.5) / float(grid) - 0.5;
+        float u = (float(i) + 0.5) / float(grid) - 0.5;
+        float v = (float(j) + 0.5) / float(grid) - 0.5;
 
-            vec3 samplePos =
-                u_rectCenter +
-                (u * 2.0 * halfW) * u_rectTangent +
-                (v * 2.0 * halfH) * u_rectBitangent;
+        vec3 samplePos =
+            u_rectCenter +
+            (u * 2.0 * halfW) * u_rectTangent +
+            (v * 2.0 * halfH) * u_rectBitangent;
 
-            vec3 L   = samplePos - pos;
-            float d2 = dot(L, L);
-            if (d2 <= 0.0) continue;
+        vec3 Lvec = samplePos - pos;
+        float d2  = dot(Lvec, Lvec);
+        if (d2 <= 0.0) continue;
 
-            vec3 wi = normalize(L);
+        vec3 wi = normalize(Lvec);
 
-            // surface faces the light?
-            float NdotL = max(dot(N, wi), 0.0);
-            if (NdotL <= 0.0) continue;
+        float NdotL = max(dot(N, wi), 0.0);
+        if (NdotL <= 0.0) continue;
 
-            // light emits only on one side (front side)
-            float NL_light = max(dot(-u_rectNormal, wi), 0.0);
-            if (NL_light <= 0.0) continue;
+        float NL_light = max(dot(-u_rectNormal, wi), 0.0);
+        if (NL_light <= 0.0) continue;
 
-            // geometric term ~ cos(theta_surf)*cos(theta_light)/r^2
-            float G = (NdotL * NL_light) / d2;
-
-            accum += G;
-        }
+        float G = (NdotL * NL_light) / d2;
+        accum += G;
     }
 
     if (used == 0) return vec3(0.0);
 
-    // average over samples, multiply by area and light color
-    float factor = area / float(used);
+    float factor  = area / float(used);
     vec3 radiance = u_rectColor * accum * factor;
 
-    // diffuse only (you can add specular if you want)
     return Kd * radiance;
 }
 
+// ---------- SSR helpers ----------
 bool isFloorPixel(vec3 pos, vec3 normal)
 {
     float epsY = 0.2;
@@ -594,117 +797,85 @@ bool isFloorPixel(vec3 pos, vec3 normal)
     return nearPlane && normalUp;
 }
 
-vec3 computeSSR(vec3 pos, vec3 normal,
-                vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
+vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
 {
-    // Ray origin & direction in world space
     vec3 N = normalize(normal);
-    vec3 V = normalize(u_eye - pos);      // view direction (towards eye)
-    vec3 R = reflect(-V, N);              // reflection direction (into scene)
+    vec3 V = normalize(u_eye - pos);
+    vec3 R = reflect(-V, N);
 
-    vec3 rayOrigin = pos + N * 0.02;      // small bias
+    vec3 rayOrigin = pos + N * 0.02;
 
     float t = 0.1;
     vec3 hitColor = vec3(0.0);
-    bool hit = false;
 
-    for (int i = 0; i < u_ssrMaxSteps; ++i) {
-        if (t > u_ssrMaxDistance)
-            break;
+    for (int i = 0; i < u_ssrMaxSteps; ++i)
+    {
+        if (t > u_ssrMaxDistance) break;
 
         vec3 samplePos = rayOrigin + R * t;
 
-        // project samplePos to screen to get UV
         vec4 clip = u_proj * u_view * vec4(samplePos, 1.0);
-        if (clip.w <= 0.0) {
-            t += u_ssrStep;
-            continue;
-        }
+        if (clip.w <= 0.0) { t += u_ssrStep; continue; }
 
         vec3 ndc = clip.xyz / clip.w;
-        // outside screen?
-        if (ndc.x < -1.0 || ndc.x > 1.0 ||
-            ndc.y < -1.0 || ndc.y > 1.0) {
-            t += u_ssrStep;
-            continue;
+        if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0) {
+            t += u_ssrStep; continue;
         }
 
         vec2 uv = ndc.xy * 0.5 + 0.5;
 
         vec3 scenePos = texture(gPosition, uv).xyz;
-        if (scenePos == vec3(0.0)) {
-            t += u_ssrStep;
-            continue;
-        }
+        if (scenePos == vec3(0.0)) { t += u_ssrStep; continue; }
 
-        // Reject self-hits on the floor itself (prevents banding)
         vec3 sceneNormal = texture(gNormal, uv).xyz;
-        if (isFloorPixel(scenePos, sceneNormal)) {
-            t += u_ssrStep;
-            continue;
-        }
+        if (isFloorPixel(scenePos, sceneNormal)) { t += u_ssrStep; continue; }
 
-        // Compare depths from the camera instead of from the ray origin
         float rayDepth   = length(samplePos - u_eye);
-        float sceneDepth = length(scenePos - u_eye);
+        float sceneDepth = length(scenePos  - u_eye);
 
-        // depth intersection test (screen-space ray vs scene)
-        if (abs(sceneDepth - rayDepth) < u_ssrThickness) {
-            // Hit: fetch G-buffer data at that point and re-compute lighting
-            vec3 hitNormal = sceneNormal;
-            vec3 hitKa     = texture(gAmbient, uv).rgb;
-            vec3 hitKd     = texture(gDiffuse, uv).rgb;
-            vec4 hitSpec   = texture(gSpecular, uv);
-            vec3 hitKs     = hitSpec.rgb;
+        if (abs(sceneDepth - rayDepth) < u_ssrThickness)
+        {
+            vec3 hitKa   = texture(gAmbient, uv).rgb;
+            vec3 hitKd   = texture(gDiffuse, uv).rgb;
+            vec4 hitSpec = texture(gSpecular, uv);
+            vec3 hitKs   = hitSpec.rgb;
             float hitNsRaw = hitSpec.a;
-            bool  hitEmissive = (hitNsRaw < 0.0);
-            float hitNs   = max(hitNsRaw, 1.0);
+
+            bool hitEmissive = (hitNsRaw < 0.0);
+            float hitNs = max(hitNsRaw, 1.0);
 
             if (hitEmissive) {
-                hitColor = hitKd;   // emissive: just use color
+                hitColor = hitKd;
             } else {
-                vec3 hN = normalize(hitNormal);
-                vec3 L  = normalize(u_lightPos - scenePos);
-                vec3 V2 = normalize(u_eye      - scenePos);
-                vec3 H2 = normalize(L + V2);
+                vec3 hN = normalize(sceneNormal);
+                vec3 Ld = normalize(u_lightDir);
+                vec3 V2 = normalize(u_eye - scenePos);
+                vec3 H2 = normalize(Ld + V2);
 
-                float NdotL2 = max(dot(hN, L), 0.0);
+                float NdotL2 = max(dot(hN, Ld), 0.0);
                 float NdotH2 = max(dot(hN, H2), 0.0);
 
                 float ao2 = 1.0;
-                if (u_enableSSAO) {
-                    ao2 = texture(u_ssaoTex, uv).r;
-                }
+                if (u_enableSSAO) ao2 = texture(u_ssaoTex, uv).r;
 
                 vec3 ambient2  = (hitKa * hitKd) * u_Ia * ao2;
                 vec3 diffuse2  = u_Id * hitKd * NdotL2;
-                vec3 specular2 = (NdotL2 > 0.0)
-                    ? (u_Is * hitKs * pow(NdotH2, hitNs))
-                    : vec3(0.0);
-                vec3 direct2   = diffuse2 + specular2;
+                vec3 specular2 = (NdotL2 > 0.0) ? (u_Is * hitKs * pow(NdotH2, hitNs)) : vec3(0.0);
 
-                float dist2 = length(u_lightPos - scenePos);
-                float atten2 = 1.0 /
-                    (u_attConst + u_attLinear * dist2 + u_attQuadratic * dist2 * dist2);
-
-                direct2 *= atten2;
-                hitColor = ambient2 + direct2;
+                hitColor = ambient2 + diffuse2 + specular2;
             }
 
-            hit = true;
-            break;
+            return hitColor;
         }
 
         t += u_ssrStep;
     }
 
-    if (!hit)
-        return vec3(0.0);
-
-    return hitColor;
+    return vec3(0.0);
 }
 
 
+// ==================== main ====================
 void main()
 {
     vec3 pos      = texture(gPosition, v_uv).xyz;
@@ -717,128 +888,107 @@ void main()
     bool  isEmissive = (NsRaw < 0.0);
     float Ns      = max(NsRaw, 1.0);
 
-    // Skip pixels with no geometry
     if (pos == vec3(0.0)) {
         FragColor   = vec4(0.0);
         BrightColor = vec4(0.0);
         return;
     }
 
-    // ---------- DEBUG VIEWS (no bloom) ----------
-    if (u_viewMode == 1) {
-        vec3 p = normalize(pos) * 0.5 + 0.5;
-        FragColor   = vec4(p, 1.0);
-        BrightColor = vec4(0.0);
-        return;
-    }
-    if (u_viewMode == 2) {
-        vec3 n = normalize(normal) * 0.5 + 0.5;
-        FragColor   = vec4(n, 1.0);
-        BrightColor = vec4(0.0);
-        return;
-    }
-    if (u_viewMode == 3) {
-        FragColor   = vec4(Ka, 1.0);
-        BrightColor = vec4(0.0);
-        return;
-    }
-    if (u_viewMode == 4) {
-        FragColor   = vec4(Kd, 1.0);
-        BrightColor = vec4(0.0);
-        return;
-    }
-    if (u_viewMode == 5) {
-        FragColor   = vec4(Ks, 1.0);
-        BrightColor = vec4(0.0);
-        return;
-    }
-
-    // NEW: SSAO debug view
+    // Debug views
+    if (u_viewMode == 1) { FragColor = vec4(normalize(pos) * 0.5 + 0.5, 1.0); BrightColor = vec4(0.0); return; }
+    if (u_viewMode == 2) { FragColor = vec4(normalize(normal) * 0.5 + 0.5, 1.0); BrightColor = vec4(0.0); return; }
+    if (u_viewMode == 3) { FragColor = vec4(Ka, 1.0); BrightColor = vec4(0.0); return; }
+    if (u_viewMode == 4) { FragColor = vec4(Kd, 1.0); BrightColor = vec4(0.0); return; }
+    if (u_viewMode == 5) { FragColor = vec4(Ks, 1.0); BrightColor = vec4(0.0); return; }
     if (u_viewMode == 6) {
-        float ao = 1.0;
-        if (u_enableSSAO) {
-            ao = texture(u_ssaoTex, v_uv).r;
-        }
-        FragColor   = vec4(vec3(ao), 1.0); // grayscale AO
-        BrightColor = vec4(0.0);
-        return;
+        float aoDbg = u_enableSSAO ? texture(u_ssaoTex, v_uv).r : 1.0;
+        FragColor = vec4(vec3(aoDbg), 1.0); BrightColor = vec4(0.0); return;
     }
-    // ---------- END DEBUG VIEWS ----------
 
-    // Emissive objects: encoded by negative shininess (NsRaw < 0.0)
+    // Emissive
     if (isEmissive) {
         vec3 emissive = Kd;
-
         FragColor = vec4(emissive, 1.0);
 
         vec3 bright = vec3(0.0);
         if (u_enableBloom) {
-            float brightness = max(max(emissive.r, emissive.g), emissive.b);
-            if (brightness > u_bloomThreshold)
-                bright = emissive;
+            float b = max(max(emissive.r, emissive.g), emissive.b);
+            if (b > u_bloomThreshold) bright = emissive;
         }
         BrightColor = vec4(bright, 1.0);
         return;
     }
 
-    // ----- NORMAL LIGHTING PATH -----
     vec3 N = normalize(normal);
 
     float ao = 1.0;
-    if (u_enableSSAO) {
-        ao = texture(u_ssaoTex, v_uv).r;
-    }
+    if (u_enableSSAO) ao = texture(u_ssaoTex, v_uv).r;
 
-    // ambient
+    // Ambient
     vec3 ambient = (Ka * Kd) * u_Ia * ao;
 
-    // ========== POINT LIGHT (sphere) ==========
+    float s = clamp(u_shadowStrength, 0.0, 1.0);
 
-    vec3 L = normalize(u_lightPos - pos);
-    vec3 V = normalize(u_eye - pos);
-    vec3 H = normalize(L + V);
+    // ===== Point light (with cube shadow) =====
+    vec3 Lp = normalize(u_lightPos - pos);
+    vec3 V  = normalize(u_eye - pos);
+    vec3 Hp = normalize(Lp + V);
 
-    float NdotL = max(dot(N, L), 0.0);
-    float NdotH = max(dot(N, H), 0.0);
+    float NdotLp = max(dot(N, Lp), 0.0);
+    float NdotHp = max(dot(N, Hp), 0.0);
+    
+    float qLp = u_enableToon ? toonQuantize(NdotLp, u_toonSteps) : NdotLp;
 
-    vec3 diffuse  = u_Id * Kd * NdotL;
-    vec3 specular = (NdotL > 0.0)
-        ? (u_Is * Ks * pow(NdotH, Ns))
-        : vec3(0.0);
+    vec3 pointDiffuse  = u_Id * Kd * qLp;
+    vec3 pointSpecular = (NdotLp > 0.0) ? (u_Is * Ks * pow(NdotHp, Ns)) : vec3(0.0);
+    vec3 directPoint   = pointDiffuse + pointSpecular;
 
-    vec3 directPoint = diffuse + specular;
-
-    // attenuation
     float dist = length(u_lightPos - pos);
-    float attenuation = 1.0 /
-        (u_attConst + u_attLinear * dist + u_attQuadratic * dist * dist);
+    float attenuation = 1.0 / (u_attConst + u_attLinear * dist + u_attQuadratic * dist * dist);
     directPoint *= attenuation;
 
-    // shadows
-    float shadow = 0.0;
-    if (u_enableShadows) {
-        vec3  lightToFrag = pos - u_lightPos;
-        float currentDepth = length(lightToFrag);
-        float closestDepth = texture(u_shadowCube, lightToFrag).r * u_far;
+    float pointShadow = 0.0;
+    if (u_enableShadows) pointShadow = calcPointShadow(pos);
+    vec3 pointWithShadow = directPoint * mix(s, 1.0, 1.0 - pointShadow);
 
-        float bias = 0.03;
-        shadow = (currentDepth - bias > closestDepth) ? 1.0 : 0.0;
-    }
+    // ===== Directional light (with 2D shadow map) =====
+    vec3 Ld = normalize(u_lightDir);
+    vec3 Hd = normalize(Ld + V);
 
-    float s = clamp(u_shadowStrength, 0.0, 1.0);
-    vec3 pointWithShadow = mix(directPoint * s, directPoint, 1.0 - shadow);
+    float NdotLd = max(dot(N, Ld), 0.0);
+    float NdotHd = max(dot(N, Hd), 0.0);
 
-    // ========== RECTANGULAR AREA LIGHT ==========
+    float qLd = u_enableToon ? toonQuantize(NdotLd, u_toonSteps) : NdotLd;
+
+    vec3 dirDiffuse    = u_Id * Kd * qLd;
+    vec3 dirSpecular = (NdotLd > 0.0) ? (u_Is * Ks * pow(NdotHd, Ns)) : vec3(0.0);
+    vec3 directDir   = dirDiffuse + dirSpecular;
+
+    float dirShadow = 0.0;
+    if (u_enableShadows) dirShadow = calcDirShadow(pos, N);
+    vec3 dirWithShadow = directDir * mix(s, 1.0, 1.0 - dirShadow);
+
+    // ===== Rect area light =====
     vec3 directArea = vec3(0.0);
     if (u_enableAreaLight) {
         directArea = evalRectAreaLight(pos, N, Ka, Kd, Ks, NsRaw) * u_Id;
     }
 
-    // total lighting
-    vec3 lighting = ambient + pointWithShadow + directArea;
+    vec3 lighting = ambient + pointWithShadow + dirWithShadow + directArea;
+
+    // ===== Toon shading (quantize final lighting) =====
+    if (u_enableToon) {
+        lighting = toonQuantize3(lighting, u_toonSteps);
+    }
+
+    // ===== Edge darkening =====
+    if (u_enableEdges) {
+        float e = sobelEdge(v_uv);
+        lighting *= (1.0 - e * u_edgeStrength); // black contour
+    }
 
 
-    // ===== Screen-Space Reflection on floor =====
+    // SSR on floor
     if (u_enableSSR && isFloorPixel(pos, normal)) {
         vec3 refl = computeSSR(pos, normal, Ka, Kd, Ks, NsRaw);
         lighting = mix(lighting, refl, u_ssrIntensity);
@@ -847,15 +997,15 @@ void main()
     // Bloom bright-pass
     vec3 bright = vec3(0.0);
     if (u_enableBloom) {
-        float brightness = max(max(lighting.r, lighting.g), lighting.b);
-        if (brightness > u_bloomThreshold)
-            bright = lighting;
+        float b = max(max(lighting.r, lighting.g), lighting.b);
+        if (b > u_bloomThreshold) bright = lighting;
     }
 
     FragColor   = vec4(lighting, 1.0);
     BrightColor = vec4(bright, 1.0);
 }
 )";
+
 
 
 // Gaussian blur for bloom (ping-pong)
@@ -1889,6 +2039,53 @@ static void buildAreaLightBasis(glm::vec3& outNormal, glm::vec3& outTangent, glm
     outBitangent = glm::normalize(glm::vec3(R * glm::vec4(0, 1, 0, 0)));
 }
 
+static void renderDirectionalShadowPass()
+{
+    // Build light view/proj from your spec-controlled globals:
+    glm::mat4 lightView = glm::lookAt(g_dirLightEye, g_dirLightCenter, g_dirLightUp);
+
+    // Ortho “range” box (Range = 5 means [-5,5] on x/y in light space)
+    glm::mat4 lightProj = glm::ortho(-g_dirLightRange, g_dirLightRange,
+        -g_dirLightRange, g_dirLightRange,
+        g_dirLightNear, g_dirLightFar);
+    g_dirLightVP = lightProj * lightView;
+
+    glViewport(0, 0, DIR_SHADOW_SIZE, DIR_SHADOW_SIZE);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_dirShadowFBO);
+    glEnable(GL_DEPTH_TEST);
+    glClear(GL_DEPTH_BUFFER_BIT);
+
+    glUseProgram(g_dirDepthProgram);
+
+    GLint locModel = glGetUniformLocation(g_dirDepthProgram, "u_model");
+    GLint locLightVP = glGetUniformLocation(g_dirDepthProgram, "u_lightVP");
+    glUniformMatrix4fv(locLightVP, 1, GL_FALSE, glm::value_ptr(g_dirLightVP)); // FIX
+
+
+    glm::mat4 triceModel = getTriceModel();
+
+    // Optional: slope acne reduction trick
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_FRONT);
+
+    for (size_t i = 0; i < g_meshes.size(); ++i) {
+        const Mesh& mesh = g_meshes[i];
+        if (mesh.vao == 0 || mesh.indexCount <= 0) continue;
+
+        bool isTrice = (g_triceFirstMesh != (size_t)-1 && i >= g_triceFirstMesh);
+        glm::mat4 model = isTrice ? triceModel : mesh.model;
+
+        glBindVertexArray(mesh.vao);
+        glUniformMatrix4fv(locModel, 1, GL_FALSE, glm::value_ptr(model));
+        glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, 0);
+    }
+
+    glCullFace(GL_BACK);
+    glDisable(GL_CULL_FACE);
+
+    glBindVertexArray(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
 
 
 // Main display: deferred shading pipeline
@@ -1906,9 +2103,11 @@ static void on_display(GLFWwindow* window)
     glm::mat4 proj = glm::perspective(glm::radians(g_fov), aspect, 0.1f, 100.0f);
     glm::mat4 view = glm::lookAt(g_eye, g_center, g_up);
 
-    glm::vec3 lightPos = g_lightEye; // point light position follows sphere
+    glm::vec3 lightPos = g_pointLightPos; // point light position follows sphere
 
     // 1) Shadow pass (point light cube)
+    renderDirectionalShadowPass();
+
     renderShadowPass(lightPos);
 
     // 2) Geometry pass -> G-buffers
@@ -2005,7 +2204,7 @@ static void on_display(GLFWwindow* window)
     if (g_lightSphereVAO != 0)
     {
         glm::mat4 model(1.0f);
-        model = glm::translate(model, g_lightEye);     // same position as point light
+        model = glm::translate(model, g_pointLightPos);     // same position as point light
         model = glm::scale(model, glm::vec3(g_lightSphereRadius));
 
         glBindVertexArray(g_lightSphereVAO);
@@ -2152,6 +2351,30 @@ static void on_display(GLFWwindow* window)
     glUniform1i(glGetUniformLocation(g_lightProgram, "u_enableSSAO"),
         g_enableSSAO ? 1 : 0);
 
+
+    // ---- Directional shadow map + light matrices ----
+
+    // Bind shadow map (2D depth)
+    glActiveTexture(GL_TEXTURE7);
+    glBindTexture(GL_TEXTURE_2D, g_dirShadowTex);
+    glUniform1i(glGetUniformLocation(g_lightProgram, "u_dirShadowMap"), 7);
+
+    // Pass light VP (computed in renderDirectionalShadowPass())
+    glUniformMatrix4fv(glGetUniformLocation(g_lightProgram, "u_lightVP"),
+        1, GL_FALSE, glm::value_ptr(g_dirLightVP));
+
+    // Pass light direction (world space).
+    // Convention: u_lightDir = direction FROM surface TO light
+    // Explanation: (eye -> center) is the direction the light rays travel.
+    // From surface to light is opposite of ray travel, so use (center - eye).
+    glm::vec3 lightDir = glm::normalize(g_dirLightEye - g_dirLightCenter);
+    //glm::vec3 lightDir = glm::normalize(g_dirLightCenter - g_dirLightEye);
+
+    glUniform3fv(glGetUniformLocation(g_lightProgram, "u_lightDir"),
+        1, glm::value_ptr(lightDir));
+
+
+
     // Camera / light uniforms
     glUniform3fv(glGetUniformLocation(g_lightProgram, "u_eye"), 1, glm::value_ptr(g_eye));
 
@@ -2203,6 +2426,15 @@ static void on_display(GLFWwindow* window)
         glUniform1i(glGetUniformLocation(g_lightProgram, "u_rectSamples"), g_areaSamples);
         glUniform1i(glGetUniformLocation(g_lightProgram, "u_enableAreaLight"), g_enableAreaLight ? 1 : 0);
     }
+
+    glUniform1i(glGetUniformLocation(g_lightProgram, "u_enableToon"), g_enableToon ? 1 : 0);
+    glUniform1i(glGetUniformLocation(g_lightProgram, "u_toonSteps"), g_toonSteps);
+
+    glUniform1i(glGetUniformLocation(g_lightProgram, "u_enableEdges"), g_enableEdges ? 1 : 0);
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_edgeDepthThreshold"), g_edgeDepthThreshold);
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_edgeNormalThreshold"), g_edgeNormalThreshold);
+    glUniform1f(glGetUniformLocation(g_lightProgram, "u_edgeStrength"), g_edgeStrength);
+
 
     glBindVertexArray(g_quadVAO);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -2375,10 +2607,20 @@ static void on_gui()
     ImGui::Checkbox("Normal map (Trice)", &g_enableNormalMap);
 
     ImGui::Separator();
-    ImGui::Text("Directional Light");
-    ImGui::DragFloat3("Light Eye", glm::value_ptr(g_lightEye), 0.05f);
+    ImGui::Text("Point Light");
+    ImGui::DragFloat3("Point Pos", &g_pointLightPos.x, 0.05f);
     ImGui::DragFloat3("Light Center", glm::value_ptr(g_lightCenter), 0.05f);
     ImGui::SliderFloat("Light Range", &g_lightRange, 1.0f, 10.0f);
+
+    ImGui::Separator();
+    ImGui::Text("Directional Light Camera (2D shadow)");
+    ImGui::DragFloat3("Dir Eye", &g_dirLightEye.x, 0.05f);
+    ImGui::DragFloat3("Dir Center", &g_dirLightCenter.x, 0.05f);
+    ImGui::DragFloat3("Dir Up", &g_dirLightUp.x, 0.05f);
+
+    ImGui::SliderFloat("Dir Near", &g_dirLightNear, 0.01f, 2.0f);
+    ImGui::SliderFloat("Dir Far", &g_dirLightFar, 1.0f, 50.0f);
+    ImGui::SliderFloat("Dir Range", &g_dirLightRange, 1.0f, 20.0f);
 
     ImGui::Checkbox("Enable Shadows", &g_enableShadows);
     ImGui::SliderFloat("Shadow Strength", &g_shadowStrength, 0.0f, 1.0f);
@@ -2432,6 +2674,17 @@ static void on_gui()
     ImGui::DragFloat3("Demo light world pos", &g_volDemoLightPos.x, 0.05f);
     ImGui::SliderFloat("Vol Source radius", &g_volSourceRadius, 0.0f, 0.3f);
     ImGui::SliderFloat("Vol Threshold", &g_volThreshold, 0.0f, 2.0f);
+
+    ImGui::Separator();
+    ImGui::Text("NPR / Toon");
+    ImGui::Checkbox("Enable Toon Shading", &g_enableToon);
+    ImGui::SliderInt("Toon Steps", &g_toonSteps, 2, 6);
+
+    ImGui::Checkbox("Enable Edge Detection", &g_enableEdges);
+    ImGui::SliderFloat("Edge Depth Thresh", &g_edgeDepthThreshold, 0.001f, 0.5f);
+    ImGui::SliderFloat("Edge Normal Thresh", &g_edgeNormalThreshold, 0.01f, 1.0f);
+    ImGui::SliderFloat("Edge Strength", &g_edgeStrength, 0.0f, 1.0f);
+
 
 
     ImGui::Separator();
@@ -2593,12 +2846,16 @@ int main(int, char**)
     g_blurProgram = createProgram(kLightVertexShader, kBlurFragmentShader);
     g_finalProgram = createProgram(kLightVertexShader, kFinalFragmentShader);
     g_depthProgram = createProgram(kDepthVertexShader, kDepthFragmentShader);
+
+    g_dirDepthProgram = createProgram(kDirDepthVS, kDirDepthFS);
+
     g_ssaoProgram = createProgram(kLightVertexShader, kSSAOFragmentShader);
     g_volumetricProgram = createProgram(kLightVertexShader, kVolumetricFragmentShader);
 
 
     initSSAOKernelAndNoise();
     initShadowMap();
+    initDirectionalShadowMap();
     initFullscreenQuad();
     initLightSphere();
     initAreaRectMesh();
@@ -2689,6 +2946,10 @@ int main(int, char**)
     if (g_volumetricTex)   glDeleteTextures(1, &g_volumetricTex);
     if (g_volumetricFBO)   glDeleteFramebuffers(1, &g_volumetricFBO);
     if (g_volumetricProgram) glDeleteProgram(g_volumetricProgram);
+
+    if (g_dirShadowTex) glDeleteTextures(1, &g_dirShadowTex);
+    if (g_dirShadowFBO) glDeleteFramebuffers(1, &g_dirShadowFBO);
+    if (g_dirDepthProgram) glDeleteProgram(g_dirDepthProgram);
 
 
     ImGui_ImplOpenGL3_Shutdown();
