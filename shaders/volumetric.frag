@@ -11,6 +11,7 @@ uniform float u_exposure;           // 0.0 ~ 1.0
 uniform float u_decay;              // ~0.96815
 uniform float u_density;           // ~0.926
 uniform float u_weight;             // ~0.58767
+uniform float u_sourceRadius;
 
 // Optional: threshold on the occlusion buffer to ignore tiny noise
 uniform float u_threshold;          // you already have this uniform
@@ -42,6 +43,12 @@ void main()
 
         // Convert to a single scalar (luminance or just max component)
         float lum = max(max(c.r, c.g), c.b);
+
+
+        float d = distance(sampleCoord, u_lightScreenPos);
+        float sourceMask = smoothstep(u_sourceRadius, 0.0, d); // 1 near light, 0 far
+        lum *= sourceMask;
+
 
         // Optional threshold to kill tiny noise
         if (lum > u_threshold)

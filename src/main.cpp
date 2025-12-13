@@ -55,7 +55,9 @@ GLuint g_finalProgram = 0; // final combine pass
 // ==============================
 GLuint g_dirShadowFBO = 0;
 GLuint g_dirShadowTex = 0;
-const int DIR_SHADOW_SIZE = 1024;
+//const int DIR_SHADOW_SIZE = 1024;
+const int DIR_SHADOW_SIZE = 4096;
+
 
 glm::mat4 g_lightVP = glm::mat4(1.0f); // light view-projection for directional shadow
 
@@ -669,6 +671,10 @@ static void initBloomBuffers(int width, int height)
         GL_RGBA, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
         GL_TEXTURE_2D, g_hdrColorTex, 0);
 
@@ -679,6 +685,10 @@ static void initBloomBuffers(int width, int height)
         GL_RGBA, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
         GL_TEXTURE_2D, g_brightColorTex, 0);
 
@@ -1731,8 +1741,8 @@ static void on_display(GLFWwindow* window)
                                                                
         // IMPORTANT: now the scene buffer is from *this* frame
         glActiveTexture(GL_TEXTURE0);
-        //glBindTexture(GL_TEXTURE_2D, g_brightColorTex);
-        glBindTexture(GL_TEXTURE_2D, g_hdrColorTex);
+        glBindTexture(GL_TEXTURE_2D, g_brightColorTex);
+        //glBindTexture(GL_TEXTURE_2D, g_hdrColorTex);
 
         glUniform1i(glGetUniformLocation(g_volumetricProgram, "u_scene"), 0);
 
@@ -1753,7 +1763,7 @@ static void on_display(GLFWwindow* window)
 
 
         glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_threshold"), g_volThreshold);
-        /*glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_sourceRadius"), g_volSourceRadius);*/
+        glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_sourceRadius"), g_volSourceRadius);
 
         glBindVertexArray(g_quadVAO);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -1761,6 +1771,16 @@ static void on_display(GLFWwindow* window)
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
+
+    if (g_enableVolumetric && !doVol) {
+        glBindFramebuffer(GL_FRAMEBUFFER, g_volumetricFBO);
+        glViewport(0, 0, display_w, display_h);
+        glDisable(GL_DEPTH_TEST);
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+
 
     // 5) Final combine: HDR scene + blurred bloom -> default framebuffer
     glViewport(0, 0, display_w, display_h);
@@ -1791,7 +1811,7 @@ static void on_display(GLFWwindow* window)
         g_enableBloom ? 1 : 0);
 
     glUniform1i(glGetUniformLocation(g_finalProgram, "u_enableVolumetric"),
-        g_enableVolumetric ? 1 : 0);
+        (g_enableVolumetric&& doVol) ? 1 : 0);
 
 
     glUniform1f(glGetUniformLocation(g_finalProgram, "u_bloomIntensity"),
