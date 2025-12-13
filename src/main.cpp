@@ -170,6 +170,11 @@ const int   SSAO_KERNEL_SIZE = 64;
 float g_ssaoRadius = 0.5f;    // spec
 float g_ssaoBias = 0.025f;  // spec
 
+GLuint g_ssaoBlurProgram = 0;
+GLuint g_ssaoBlurFBO = 0;
+GLuint g_ssaoBlurTex = 0;
+
+
 // ==============================
 // Screen-Space Reflection (SSR)
 // ==============================
@@ -1128,15 +1133,16 @@ void main()
 )";
 
 // SSAO pass: compute ambient occlusion factor into a single-channel texture
+// SSAO pass: view-space SSAO (correct)
 static const char* kSSAOFragmentShader = R"(#version 410 core
 in vec2 v_uv;
 out float FragColor;
 
-uniform sampler2D gPosition;  // world-space position
-uniform sampler2D gNormal;    // world-space normal
+uniform sampler2D gPosition;  // WORLD-space position
+uniform sampler2D gNormal;    // WORLD-space normal
 uniform sampler2D texNoise;
 
-uniform vec3  u_samples[64];
+uniform vec3  u_samples[64];  // hemisphere samples in tangent space (z >= 0)
 uniform mat4  u_view;
 uniform mat4  u_proj;
 uniform float u_radius;
@@ -1145,60 +1151,80 @@ uniform vec2  u_noiseScale;
 
 void main()
 {
-    vec3 fragPos = texture(gPosition, v_uv).xyz;
-    vec3 normal  = normalize(texture(gNormal,   v_uv).xyz);
+    vec3 worldPos = texture(gPosition, v_uv).xyz;
+    vec3 worldN   = texture(gNormal,   v_uv).xyz;
 
-    // Skip empty pixels (no geometry)
-    if (fragPos == vec3(0.0)) {
-        FragColor = 1.0;
-        return;
-    }
+    if (worldPos == vec3(0.0)) { FragColor = 1.0; return; }
 
-    // TBN from random rotation + normal
+    // ---- Convert to VIEW space ----
+    vec3 fragPos = (u_view * vec4(worldPos, 1.0)).xyz;
+    vec3 normal  = normalize(mat3(u_view) * worldN);
+
+    // Random vector (noise) - keep in tangent plane
     vec3 randomVec = normalize(texture(texNoise, v_uv * u_noiseScale).xyz);
+
+    // Build TBN in VIEW space
     vec3 tangent   = normalize(randomVec - normal * dot(randomVec, normal));
     vec3 bitangent = cross(normal, tangent);
     mat3 TBN       = mat3(tangent, bitangent, normal);
 
     float occlusion = 0.0;
 
-    for (int i = 0; i < 64; ++i) {
-        // sample position in world space
-        vec3 samplePos = TBN * u_samples[i];
-        samplePos = fragPos + samplePos * u_radius;
+    for (int i = 0; i < 64; ++i)
+    {
+        // sample in VIEW space around current point
+        vec3 samp = TBN * u_samples[i];
+        vec3 samplePos = fragPos + samp * u_radius;
 
-        // project sample position into screen space
-        vec4 offset = u_proj * u_view * vec4(samplePos, 1.0);
+        // project samplePos -> screen uv
+        vec4 offset = u_proj * vec4(samplePos, 1.0);
         offset.xyz /= offset.w;
-        offset.xyz = offset.xyz * 0.5 + 0.5;
+        vec2 uv = offset.xy * 0.5 + 0.5;
 
-        // outside screen?
-        if (offset.x < 0.0 || offset.x > 1.0 ||
-            offset.y < 0.0 || offset.y > 1.0)
-            continue;
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) continue;
 
-        // position at that screen sample
-        vec3 sampleFragPos = texture(gPosition, offset.xy).xyz;
+        // fetch position at that uv and convert to VIEW space depth
+        vec3 sampleWorldPos = texture(gPosition, uv).xyz;
+        if (sampleWorldPos == vec3(0.0)) continue;
 
-        // depth along the view direction, approximated by distances
-        float sampleDist   = length(samplePos      - fragPos);
-        float realDist     = length(sampleFragPos  - fragPos);
+        float sampleDepth = (u_view * vec4(sampleWorldPos, 1.0)).z; // VIEW z
 
-        float rangeCheck = smoothstep(0.0, 1.0, u_radius / abs(realDist - sampleDist));
-
-        if (realDist < sampleDist - u_bias)
+        // In OpenGL view space, z is negative in front of camera.
+        // If sampleDepth is "closer" (less negative / greater) than our samplePos.z, it occludes.
+        float rangeCheck = smoothstep(0.0, 1.0, u_radius / abs(fragPos.z - sampleDepth));
+        if (sampleDepth >= samplePos.z + u_bias)
             occlusion += rangeCheck;
     }
 
     float ao = 1.0 - (occlusion / 64.0);
-    ao = clamp(ao, 0.0, 1.0);
-
-    // boost contrast so contact areas get much darker
-    ao = pow(ao, 2.5);
-
-    FragColor = ao;
+    FragColor = clamp(ao, 0.0, 1.0);
 }
 )";
+
+static const char* kSSAOBlurFragmentShader = R"(#version 410 core
+in vec2 v_uv;
+out float FragColor;
+
+uniform sampler2D u_ssaoInput;
+
+void main()
+{
+    vec2 texel = 1.0 / vec2(textureSize(u_ssaoInput, 0));
+    float result = 0.0;
+
+    // simple 4x4 box blur (fast + good enough for assignment)
+    for (int y = -2; y <= 1; ++y)
+    for (int x = -2; x <= 1; ++x)
+    {
+        vec2 off = vec2(x, y) * texel;
+        result += texture(u_ssaoInput, v_uv + off).r;
+    }
+    result /= 16.0;
+
+    FragColor = result;
+}
+)";
+
 
 
 // Volumetric light scattering ("god rays") post-process
@@ -1635,6 +1661,31 @@ static void initSSAOBuffer(int width, int height)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+static void initSSAOBlurBuffer(int width, int height)
+{
+    if (width <= 0 || height <= 0) return;
+
+    if (g_ssaoBlurTex) glDeleteTextures(1, &g_ssaoBlurTex);
+    if (g_ssaoBlurFBO) glDeleteFramebuffers(1, &g_ssaoBlurFBO);
+
+    glGenFramebuffers(1, &g_ssaoBlurFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_ssaoBlurFBO);
+
+    glGenTextures(1, &g_ssaoBlurTex);
+    glBindTexture(GL_TEXTURE_2D, g_ssaoBlurTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, width, height, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_ssaoBlurTex, 0);
+
+    GLenum drawBuf = GL_COLOR_ATTACHMENT0;
+    glDrawBuffers(1, &drawBuf);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+
 static void initVolumetricBuffer(int width, int height)
 {
     if (width <= 0 || height <= 0) return;
@@ -1768,6 +1819,7 @@ static void initGBuffer(int width, int height)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     initBloomBuffers(width, height);
     initSSAOBuffer(width, height);
+    initSSAOBlurBuffer(width, height);
     initVolumetricBuffer(width, height);
 
 }
@@ -2325,6 +2377,26 @@ static void on_display(GLFWwindow* window)
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
+    if (g_enableSSAO) {
+        glBindFramebuffer(GL_FRAMEBUFFER, g_ssaoBlurFBO);
+        glViewport(0, 0, g_ssaoWidth, g_ssaoHeight);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_DEPTH_TEST);
+
+        glUseProgram(g_ssaoBlurProgram);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, g_ssaoTex);
+        glUniform1i(glGetUniformLocation(g_ssaoBlurProgram, "u_ssaoInput"), 0);
+
+        glBindVertexArray(g_quadVAO);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glBindVertexArray(0);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+
+
 
     // 3) Lighting pass -> HDR FBO (scene + bright)
     glBindFramebuffer(GL_FRAMEBUFFER, g_hdrFBO);
@@ -2363,7 +2435,7 @@ static void on_display(GLFWwindow* window)
 
     // SSAO texture
     glActiveTexture(GL_TEXTURE6);
-    glBindTexture(GL_TEXTURE_2D, g_enableSSAO ? g_ssaoTex : 0);
+    glBindTexture(GL_TEXTURE_2D, g_enableSSAO ? g_ssaoBlurTex : 0);
     glUniform1i(glGetUniformLocation(g_lightProgram, "u_ssaoTex"), 6);
     glUniform1i(glGetUniformLocation(g_lightProgram, "u_enableSSAO"),
         g_enableSSAO ? 1 : 0);
@@ -2867,6 +2939,8 @@ int main(int, char**)
     g_dirDepthProgram = createProgram(kDirDepthVS, kDirDepthFS);
 
     g_ssaoProgram = createProgram(kLightVertexShader, kSSAOFragmentShader);
+    g_ssaoBlurProgram = createProgram(kLightVertexShader, kSSAOBlurFragmentShader);
+
     g_volumetricProgram = createProgram(kLightVertexShader, kVolumetricFragmentShader);
 
 
