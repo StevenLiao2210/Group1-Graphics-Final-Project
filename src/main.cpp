@@ -266,8 +266,8 @@ bool  g_enableToon = true;
 int   g_toonSteps = 3;     // spec says 3
 bool  g_enableEdges = true;
 
-float g_edgeDepthThreshold = 0.08f; // tune
-float g_edgeNormalThreshold = 0.35f; // tune
+float g_edgeDepthThreshold = 0.10f; // tune
+float g_edgeNormalThreshold = 1.0f; // tune
 float g_edgeStrength = 1.0f;         // 0..1
 
 // ==============================
@@ -292,7 +292,48 @@ enum VolumetricMode {
     VOL_FOG = 2
 };
 
-int g_volMode = VOL_GODRAYS;
+int g_volMode = VOL_FOG;
+
+GLuint g_occFBO = 0;
+GLuint g_occTex = 0;
+GLuint g_occDepth = 0;
+int g_occW = 0, g_occH = 0;
+
+GLuint g_colorProgram = 0; // simple shader: output uniform color
+
+
+static void initOcclusionBuffer(int w, int h) {
+    w = std::max(1, w / 2);
+    h = std::max(1, h / 2);
+    if (w == g_occW && h == g_occH) return;
+    g_occW = w; g_occH = h;
+
+    if (g_occTex) glDeleteTextures(1, &g_occTex);
+    if (g_occDepth) glDeleteRenderbuffers(1, &g_occDepth);
+    if (g_occFBO) glDeleteFramebuffers(1, &g_occFBO);
+
+    glGenFramebuffers(1, &g_occFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_occFBO);
+
+    glGenTextures(1, &g_occTex);
+    glBindTexture(GL_TEXTURE_2D, g_occTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_occTex, 0);
+
+    glGenRenderbuffers(1, &g_occDepth);
+    glBindRenderbuffer(GL_RENDERBUFFER, g_occDepth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, g_occDepth);
+
+    GLenum drawBuf = GL_COLOR_ATTACHMENT0;
+    glDrawBuffers(1, &drawBuf);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
 
 
 static GLuint createPointShadowCubemap()
@@ -1375,6 +1416,7 @@ static void on_display(GLFWwindow* window)
     // Resize G-buffer if needed
     if (display_w != g_gbufferWidth || display_h != g_gbufferHeight) {
         initGBuffer(display_w, display_h);
+        initOcclusionBuffer(display_w, display_h);
     }
 
     float aspect = (display_h > 0) ? (float)display_w / (float)display_h : 1.0f;
@@ -1772,59 +1814,138 @@ static void on_display(GLFWwindow* window)
 
     glm::vec3 volLightPos = g_useDemoVolLight ? g_volDemoLightPos : lightPos;
 
+
+    
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    //end
+
     //slide demo
+    // =======================================================
+    // SCREEN-SPACE GOD RAYS (SLIDES VERSION)
+    // =======================================================
+    // =======================================================
+    // GOD RAYS (Screen-space) — GPU Gems style
+    // Requires:
+    //   - g_occFBO + g_occTex (initOcclusionBuffer)
+    //   - g_volumetricFBO + g_volumetricTex (initVolumetricBuffer)
+    //   - g_colorProgram (simple solid color shader)
+    //   - g_volumetricProgram (radial blur shader)
+    //   - g_quadVAO
+    // =======================================================
     if (g_volMode == VOL_GODRAYS)
     {
-        // Clear volumetric target every frame
-        glBindFramebuffer(GL_FRAMEBUFFER, g_volumetricFBO);
-        glViewport(0, 0, g_volWidth, g_volHeight);
-        glDisable(GL_DEPTH_TEST);
-        glClearColor(0, 0, 0, 0);
-        glClear(GL_COLOR_BUFFER_BIT);
+        // Choose which light position drives the shafts
+        glm::vec3 lightWorld = g_useDemoVolLight ? g_volDemoLightPos : g_pointLightPos;
+
+        // ---------------------------------------------------
+        // 1) OCCLUSION MASK PASS (downsampled)
+        //    - Render all occluders black
+        //    - Render light as small white blob
+        // ---------------------------------------------------
+        glBindFramebuffer(GL_FRAMEBUFFER, g_occFBO);
+        glViewport(0, 0, g_occW, g_occH);
+        glEnable(GL_DEPTH_TEST);
+
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        glUseProgram(g_colorProgram);
+        glUniformMatrix4fv(glGetUniformLocation(g_colorProgram, "u_view"), 1, GL_FALSE, glm::value_ptr(view));
+        glUniformMatrix4fv(glGetUniformLocation(g_colorProgram, "u_proj"), 1, GL_FALSE, glm::value_ptr(proj));
+
+        // Draw scene as BLACK (occluders)
+        glUniform4f(glGetUniformLocation(g_colorProgram, "u_color"), 0, 0, 0, 1);
+
+        glm::mat4 triceModel = getTriceModel();
+        for (size_t i = 0; i < g_meshes.size(); ++i) {
+            const Mesh& mesh = g_meshes[i];
+            if (!mesh.vao || mesh.indexCount <= 0) continue;
+
+            bool isTrice = (g_triceFirstMesh != (size_t)-1 && i >= g_triceFirstMesh);
+            glm::mat4 model = isTrice ? triceModel : mesh.model;
+
+            glUniformMatrix4fv(glGetUniformLocation(g_colorProgram, "u_model"), 1, GL_FALSE, glm::value_ptr(model));
+            glBindVertexArray(mesh.vao);
+            glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, 0);
+        }
+
+        // Draw the light as WHITE (keep it SMALL so you get long shafts)
+        glUniform4f(glGetUniformLocation(g_colorProgram, "u_color"), 1, 1, 1, 1);
+
+        if (g_lightSphereVAO != 0) {
+            glm::mat4 lm(1.0f);
+            lm = glm::translate(lm, lightWorld);
+            lm = glm::scale(lm, glm::vec3(g_lightSphereRadius * 0.25f)); // << smaller = better shafts
+            glUniformMatrix4fv(glGetUniformLocation(g_colorProgram, "u_model"), 1, GL_FALSE, glm::value_ptr(lm));
+            glBindVertexArray(g_lightSphereVAO);
+            glDrawElements(GL_TRIANGLES, g_lightSphereIndexCount, GL_UNSIGNED_INT, 0);
+        }
+
+        glBindVertexArray(0);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-        glm::vec2 lightScreenPos;
-        float edgeFade = 1.0f;
-
-        glm::vec3 lightWorld = g_useDemoVolLight
-            ? g_volDemoLightPos
-            : g_pointLightPos;
-
+        // ---------------------------------------------------
+        // 2) Compute LIGHT SCREEN POS (UV 0..1)
+        // ---------------------------------------------------
         glm::vec4 clip = proj * view * glm::vec4(lightWorld, 1.0f);
-        if (clip.w > 0.0f)
-        {
-            glm::vec3 ndc = glm::vec3(clip) / clip.w;
-            glm::vec2 uv = glm::vec2(ndc) * 0.5f + 0.5f;
 
-            glm::vec2 clamped = glm::clamp(uv, glm::vec2(0.0f), glm::vec2(1.0f));
-            edgeFade = 1.0f - glm::clamp(glm::length(uv - clamped) * 2.0f, 0.0f, 1.0f);
-
-            lightScreenPos = clamped;
-
+        // If behind camera, just clear volumetric and skip
+        if (clip.w <= 0.0f) {
             glBindFramebuffer(GL_FRAMEBUFFER, g_volumetricFBO);
+            glViewport(0, 0, g_volWidth, g_volHeight);
+            glDisable(GL_DEPTH_TEST);
+            glClearColor(0, 0, 0, 0);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        }
+        else
+        {
+            glm::vec3 ndc = glm::vec3(clip) / clip.w;          // -1..1
+            glm::vec2 uv = glm::vec2(ndc.x, ndc.y) * 0.5f + 0.5f; // 0..1
+
+            // Clamp to screen (GPU Gems style still works fine clamped)
+            glm::vec2 lightScreenPos = glm::clamp(uv, glm::vec2(0.0f), glm::vec2(1.0f));
+
+            // Optional edge fade (prevents ugly smear when light is off-screen-ish)
+            glm::vec2 clamped = lightScreenPos;
+            float edgeFade = 1.0f - glm::clamp(glm::length(uv - clamped) * 2.0f, 0.0f, 1.0f);
+
+            // ---------------------------------------------------
+            // 3) RADIAL BLUR PASS -> g_volumetricTex
+            // ---------------------------------------------------
+            glBindFramebuffer(GL_FRAMEBUFFER, g_volumetricFBO);
+            glViewport(0, 0, g_volWidth, g_volHeight);
+            glDisable(GL_DEPTH_TEST);
+
+            glClearColor(0, 0, 0, 0);
+            glClear(GL_COLOR_BUFFER_BIT);
+
             glUseProgram(g_volumetricProgram);
 
+            // Input = occlusion mask
             glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, g_brightColorTex);
+            glBindTexture(GL_TEXTURE_2D, g_occTex);
             glUniform1i(glGetUniformLocation(g_volumetricProgram, "u_scene"), 0);
 
             glUniform2fv(glGetUniformLocation(g_volumetricProgram, "u_lightScreenPos"), 1, &lightScreenPos.x);
-            glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_edgeFade"), edgeFade);
 
-            // god-ray params
+            // GPU Gems params
             glUniform1i(glGetUniformLocation(g_volumetricProgram, "u_numSamples"), g_volNumSamples);
-            glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_exposure"), g_volExposure);
+            glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_exposure"), g_volExposure * edgeFade);
             glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_decay"), g_volDecay);
             glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_density"), g_volDensity);
             glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_weight"), g_volWeight);
-            glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_threshold"), g_volThreshold);
-            glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_sourceRadius"), g_volSourceRadius);
 
             glBindVertexArray(g_quadVAO);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            glBindVertexArray(0);
+
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
         }
     }
+
+
 
 
 
@@ -2304,6 +2425,7 @@ int main(int, char**)
     g_ssaoBlurProgram = createProgramFromFiles("./shaders/quad.vert", "./shaders/ssao_blur.frag");
     g_volumetricProgram = createProgramFromFiles("./shaders/quad.vert", "./shaders/volumetric.frag");
     g_volRaymarchProgram = createProgramFromFiles("./shaders/quad.vert", "./shaders/volumetric_raymarch.frag");
+    g_colorProgram = createProgramFromFiles("./shaders/color.vert", "./shaders/color.frag");
 
 
     initSSAOKernelAndNoise();
@@ -2313,12 +2435,14 @@ int main(int, char**)
     initLightSphere();
     initAreaRectMesh();
 
+
     g_shadowTexA = createPointShadowCubemap();
     g_shadowTexB = createPointShadowCubemap();
 
     int fbw, fbh;
     glfwGetFramebufferSize(window, &fbw, &fbh);
     initGBuffer(fbw, fbh);
+    initOcclusionBuffer(fbw, fbh);
 
     // Load models
     loadOBJScene("./assets/indoor_model/Grey_White_Room.obj", glm::mat4(1.0f));
