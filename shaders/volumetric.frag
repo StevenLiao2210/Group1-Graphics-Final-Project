@@ -12,6 +12,7 @@ uniform float u_decay;              // ~0.96815
 uniform float u_density;           // ~0.926
 uniform float u_weight;             // ~0.58767
 uniform float u_sourceRadius;
+uniform float u_edgeFade;
 
 // Optional: threshold on the occlusion buffer to ignore tiny noise
 uniform float u_threshold;          // you already have this uniform
@@ -59,7 +60,9 @@ void main()
 
         illuminationDecay *= u_decay;
     }
-
+    
     float intensity = accumulatedLumin * u_exposure;
-    FragColor = vec4(vec3(intensity), 1.0);
+    //FragColor = vec4(vec3(intensity), 1.0);
+    FragColor = vec4(vec3(intensity) * u_edgeFade, 1.0);
+
 }
