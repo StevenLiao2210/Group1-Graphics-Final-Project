@@ -257,15 +257,75 @@ bool isFloorPixel(vec3 pos, vec3 normal)
     return nearPlane && normalUp;
 }
 
+float viewDepthOfPos(vec3 worldPos) {
+    return -(u_view * vec4(worldPos, 1.0)).z; // positive forward depth
+}
+
+float viewDepthAtUV(vec2 uv) {
+    vec3 p = texture(gPosition, uv).xyz;
+    if (p == vec3(0.0)) return 1e9;
+    return -(u_view * vec4(p, 1.0)).z;
+}
+
+float minNeighborDepth(vec2 uv) {
+    ivec2 ts = textureSize(gPosition, 0);
+    vec2 texel = 1.0 / vec2(ts);
+
+    float m = 1e9;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            vec2 uv2 = uv + vec2(x, y) * texel;
+            m = min(m, viewDepthAtUV(uv2));
+        }
+    }
+    return m;
+}
+
+bool ssrSegmentOccluded(vec2 uv0, vec3 p0, vec2 uv1, vec3 p1)
+{
+    const int   N = 16;      // 8~24 (higher = stricter / slower)
+    const float eps = 0.02;  // 0.01~0.06 (tune)
+
+    for (int i = 1; i < N; ++i)
+    {
+        float a = float(i) / float(N);
+
+        vec2 uvi = mix(uv0, uv1, a);
+        vec3 pri = mix(p0,  p1,  a);   // point on the ray segment (world)
+
+        // depth of ray segment at this screen location
+        float zRay = viewDepthOfPos(pri);
+
+        // depth buffer at this screen location
+        float zBuf = viewDepthAtUV(uvi);
+        if (zBuf >= 1e8) continue;
+
+        // If buffer is closer than the ray segment -> something blocks it
+        if (zBuf + eps < zRay)
+            return true;
+    }
+    return false;
+}
+
+
+
 vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
 {
     vec3 N = normalize(normal);
     vec3 V = normalize(u_eye - pos);
-    vec3 R = reflect(-V, N);
+    vec3 R = normalize(reflect(-V, N));
 
+    // start a tiny bit above the floor to avoid self hits
     vec3 rayOrigin = pos + N * 0.02;
 
-    float t = 0.1;
+    vec4 oClip = u_proj * u_view * vec4(rayOrigin, 1.0);
+    vec2 uv0   = (oClip.xy / oClip.w) * 0.5 + 0.5;
+
+    float tPrev = 0.0;
+    float diffPrev = 0.0;
+    bool  hasPrev = false;
+
+    float t = 0.0;
 
     for (int i = 0; i < u_ssrMaxSteps; ++i)
     {
@@ -273,6 +333,7 @@ vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
 
         vec3 samplePos = rayOrigin + R * t;
 
+        // project to screen
         vec4 clip = u_proj * u_view * vec4(samplePos, 1.0);
         if (clip.w <= 0.0) { t += u_ssrStep; continue; }
 
@@ -287,13 +348,120 @@ vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
         if (scenePos == vec3(0.0)) { t += u_ssrStep; continue; }
 
         vec3 sceneNormal = texture(gNormal, uv).xyz;
+
+        // don't reflect the floor into itself
         if (isFloorPixel(scenePos, sceneNormal)) { t += u_ssrStep; continue; }
 
-        float rayDepth   = length(samplePos - u_eye);
-        float sceneDepth = length(scenePos  - u_eye);
+        // OPTIONAL: reject backfaces at the hit (reduces “see-through” under table)
+        // If the ray is hitting the back side of a surface in screen-space, skip it.
+        if (dot(normalize(sceneNormal), -R) < 0.05) { t += u_ssrStep; continue; }
 
-        if (abs(sceneDepth - rayDepth) < u_ssrThickness)
+        // ---- Correct depth test: compare VIEW-SPACE Z ----
+        float zRay   = -(u_view * vec4(samplePos, 1.0)).z; // positive forward depth
+        float zScene = -(u_view * vec4(scenePos,  1.0)).z;
+
+        float diff = zRay - zScene; // >0 means ray is behind geometry at that uv
+
+        // if we crossed the surface, refine between previous and current t
+        if (hasPrev && diff > 0.0 && diffPrev < 0.0)
         {
+            float a = tPrev;
+            float b = t;
+
+            // binary search a few iterations to reduce “striped” stepping artifacts
+            for (int it = 0; it < 6; ++it)
+            {
+                float m = 0.5 * (a + b);
+                vec3  mp = rayOrigin + R * m;
+
+                vec4  c  = u_proj * u_view * vec4(mp, 1.0);
+                if (c.w <= 0.0) { a = m; continue; }
+
+                vec3  n2 = c.xyz / c.w;
+                vec2  uv2 = n2.xy * 0.5 + 0.5;
+
+                vec3 sp2 = texture(gPosition, uv2).xyz;
+                if (sp2 == vec3(0.0)) { a = m; continue; }
+
+                float zR2 = -(u_view * vec4(mp,  1.0)).z;
+                float zS2 = -(u_view * vec4(sp2, 1.0)).z;
+
+                float d2 = zR2 - zS2;
+
+                if (d2 > 0.0) b = m; else a = m;
+            }
+
+            // use refined uv at b
+            vec3 hitPos = rayOrigin + R * b;
+            vec4 hitClip = u_proj * u_view * vec4(hitPos, 1.0);
+            vec3 hitNdc = hitClip.xyz / hitClip.w;
+            vec2 hitUV  = hitNdc.xy * 0.5 + 0.5;
+
+            if (ssrSegmentOccluded(uv0, rayOrigin, uv, scenePos)) {
+                tPrev = t;
+                diffPrev = diff;
+                hasPrev = true;
+                t += u_ssrStep;
+                continue;
+            }
+
+            vec3 hitScenePos = texture(gPosition, hitUV).xyz;
+            if (hitScenePos == vec3(0.0)) { t += u_ssrStep; continue; }
+
+            // This is the important occlusion test:
+            if (ssrSegmentOccluded(uv0, rayOrigin, hitUV, hitScenePos)) {
+                t += u_ssrStep;
+                continue;
+            }
+
+
+            vec3 hitKa   = texture(gAmbient,  hitUV).rgb;
+            vec3 hitKd   = texture(gDiffuse,  hitUV).rgb;
+            vec4 hitSpec = texture(gSpecular, hitUV);
+            vec3 hitKs   = hitSpec.rgb;
+            float hitNsRaw = hitSpec.a;
+
+            bool hitEmissive = (hitNsRaw < 0.0);
+            float hitNs = max(hitNsRaw, 1.0);
+
+            if (hitEmissive) {
+                return hitKd; // emissive stored in Kd
+            }
+
+            // re-light the hit (your existing approach)
+            vec3 hN = normalize(texture(gNormal, hitUV).xyz);
+            vec3 Ld = normalize(u_lightDir);
+            vec3 V2 = normalize(u_eye - texture(gPosition, hitUV).xyz);
+            vec3 H2 = normalize(Ld + V2);
+
+            float NdotL2 = max(dot(hN, Ld), 0.0);
+            float NdotH2 = max(dot(hN, H2), 0.0);
+
+            float ao2 = 1.0;
+            if (u_enableSSAO) ao2 = texture(u_ssaoTex, hitUV).r;
+
+            vec3 ambient2  = (hitKa * hitKd) * u_Ia * ao2;
+            vec3 diffuse2  = u_Id * hitKd * NdotL2;
+            vec3 specular2 = (NdotL2 > 0.0) ? (u_Is * hitKs * pow(NdotH2, hitNs)) : vec3(0.0);
+
+            return ambient2 + diffuse2 + specular2;
+        }
+
+        // “direct” thickness hit (when steps are small enough)
+        if (diff > 0.0 && diff < u_ssrThickness)
+        {
+            float zHit = -(u_view * vec4(scenePos, 1.0)).z; // scenePos must already be set above
+            float zMin = minNeighborDepth(uv);              // needs helper funcs outside computeSSR
+
+            if (zMin + 0.05 < zHit) { // try 0.03~0.08
+                // treat as no hit, keep marching
+                tPrev = t;
+                diffPrev = diff;
+                hasPrev = true;
+                t += u_ssrStep;
+                continue;
+            }
+           
             vec3 hitKa   = texture(gAmbient, uv).rgb;
             vec3 hitKd   = texture(gDiffuse, uv).rgb;
             vec4 hitSpec = texture(gSpecular, uv);
@@ -303,34 +471,37 @@ vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
             bool hitEmissive = (hitNsRaw < 0.0);
             float hitNs = max(hitNsRaw, 1.0);
 
-            if (hitEmissive) {
-                return hitKd;
-            } else {
-                vec3 hN = normalize(sceneNormal);
-                vec3 Ld = normalize(u_lightDir);
-                vec3 V2 = normalize(u_eye - scenePos);
-                vec3 H2 = normalize(Ld + V2);
+            if (hitEmissive) return hitKd;
 
-                float NdotL2 = max(dot(hN, Ld), 0.0);
-                float NdotH2 = max(dot(hN, H2), 0.0);
+            vec3 hN = normalize(sceneNormal);
+            vec3 Ld = normalize(u_lightDir);
+            vec3 V2 = normalize(u_eye - scenePos);
+            vec3 H2 = normalize(Ld + V2);
 
-                float ao2 = 1.0;
-                if (u_enableSSAO) ao2 = texture(u_ssaoTex, uv).r;
+            float NdotL2 = max(dot(hN, Ld), 0.0);
+            float NdotH2 = max(dot(hN, H2), 0.0);
 
-                // Keep SSR lighting non-toon to avoid “banding in reflections”
-                vec3 ambient2  = (hitKa * hitKd) * u_Ia * ao2;
-                vec3 diffuse2  = u_Id * hitKd * NdotL2;
-                vec3 specular2 = (NdotL2 > 0.0) ? (u_Is * hitKs * pow(NdotH2, hitNs)) : vec3(0.0);
+            float ao2 = 1.0;
+            if (u_enableSSAO) ao2 = texture(u_ssaoTex, uv).r;
 
-                return ambient2 + diffuse2 + specular2;
-            }
+            vec3 ambient2  = (hitKa * hitKd) * u_Ia * ao2;
+            vec3 diffuse2  = u_Id * hitKd * NdotL2;
+            vec3 specular2 = (NdotL2 > 0.0) ? (u_Is * hitKs * pow(NdotH2, hitNs)) : vec3(0.0);
+
+            return ambient2 + diffuse2 + specular2;
         }
+
+        // advance
+        tPrev = t;
+        diffPrev = diff;
+        hasPrev = true;
 
         t += u_ssrStep;
     }
 
     return vec3(0.0);
 }
+
 
 // ------------------------------------------------------------
 // main
