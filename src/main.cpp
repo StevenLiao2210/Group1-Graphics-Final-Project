@@ -57,8 +57,8 @@ GLuint g_volRaymarchProgram = 0; //volumetric lighting
 // ==============================
 GLuint g_dirShadowFBO = 0;
 GLuint g_dirShadowTex = 0;
-//const int DIR_SHADOW_SIZE = 1024;
-const int DIR_SHADOW_SIZE = 4096;
+const int DIR_SHADOW_SIZE = 1024;
+//const int DIR_SHADOW_SIZE = 4096;
 
 
 glm::mat4 g_lightVP = glm::mat4(1.0f); // light view-projection for directional shadow
@@ -164,7 +164,7 @@ bool   g_enableBloom = true;
 float  g_bloomThreshold = 0.8f;
 float  g_bloomIntensity = 0.8f;
 float  g_exposure = 1.5f;
-int    g_blurIterations = 10;
+int    g_blurIterations = 15;
 
 // ==============================
 // SSAO
@@ -1946,10 +1946,18 @@ static void on_display(GLFWwindow* window)
     }
 
 
+    if (g_volMode == VOL_FOG && !g_enableVolFog)
+    {
+        glBindFramebuffer(GL_FRAMEBUFFER, g_volumetricFBO);
+        glViewport(0, 0, g_volWidth, g_volHeight);
+        glDisable(GL_DEPTH_TEST);
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
 
 
-
-    if (g_volMode == VOL_FOG)
+    if (g_volMode == VOL_FOG && g_enableVolFog)
     {
         glBindFramebuffer(GL_FRAMEBUFFER, g_volumetricFBO);
         glViewport(0, 0, g_volWidth, g_volHeight);
@@ -2097,11 +2105,11 @@ static void on_gui()
     ImGui::SliderFloat("FOV", &g_fov, 20.0f, 80.0f);
 
     ImGui::Separator();
-    ImGui::Text("Triceratops Transform");
-    ImGui::DragFloat3("Trice Pos", &g_tricePos.x, 0.01f);
+    ImGui::Text("Triceratops");
+    /*ImGui::DragFloat3("Trice Pos", &g_tricePos.x, 0.01f);
     ImGui::DragFloat("Trice Scale", &g_triceScale,
         0.0001f, 0.00001f, 0.01f, "%.5f");
-    ImGui::SliderFloat("Trice Yaw", &g_triceYaw, -180.0f, 180.0f);
+    ImGui::SliderFloat("Trice Yaw", &g_triceYaw, -180.0f, 180.0f);*/
     ImGui::Checkbox("Normal map (Trice)", &g_enableNormalMap);
 
     ImGui::Separator();
@@ -2121,7 +2129,7 @@ static void on_gui()
     ImGui::SliderFloat("Dir Range", &g_dirLightRange, 1.0f, 20.0f);
 
     ImGui::Checkbox("Enable Shadows", &g_enableShadows);
-    ImGui::SliderFloat("Shadow Strength", &g_shadowStrength, 0.0f, 1.0f);
+    //ImGui::SliderFloat("Shadow Strength", &g_shadowStrength, 0.0f, 1.0f);
 
     ImGui::Separator();
     ImGui::Text("Bloom / HDR");
@@ -2140,11 +2148,11 @@ static void on_gui()
     ImGui::Separator();
     ImGui::Text("Screen-Space Reflection (floor)");
     ImGui::Checkbox("Enable SSR (floor)", &g_enableSSR);
-    ImGui::SliderFloat("SSR Intensity", &g_ssrIntensity, 0.0f, 1.0f);
+    /*ImGui::SliderFloat("SSR Intensity", &g_ssrIntensity, 0.0f, 1.0f);
     ImGui::SliderFloat("SSR Max Distance", &g_ssrMaxDistance, 1.0f, 10.0f);
     ImGui::SliderInt("SSR Max Steps", &g_ssrMaxSteps, 10, 80);
     ImGui::SliderFloat("SSR Step", &g_ssrStep, 0.05f, 0.5f);
-    ImGui::SliderFloat("SSR Thickness", &g_ssrThickness, 0.01f, 0.4f);
+    ImGui::SliderFloat("SSR Thickness", &g_ssrThickness, 0.01f, 0.4f);*/
 
     ImGui::Separator();
     ImGui::Text("Rectangular Area Light");
@@ -2178,7 +2186,7 @@ static void on_gui()
     }*/
 
     if (g_volMode == VOL_FOG) {
-        ImGui::SliderFloat("Fog Density", &g_volBaseDensity, 0.0f, 0.2f);
+        ImGui::SliderFloat("Density", &g_volBaseDensity, 0.0f, 0.2f);
         //ImGui::SliderFloat("Light Intensity", &g_volLightIntensity, 0.0f, 50.0f);
     }
 
