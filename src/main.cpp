@@ -742,6 +742,10 @@ inline void on_gui()
 
 void on_mouse_button(GLFWwindow* window, int button, int action, int mods)
 {
+	ImGuiIO& io = ImGui::GetIO();
+    if (io.WantCaptureMouse) {
+        return;
+    }
 	if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS)
 	{
 		m_myCameraManager->mousePress(RenderWidgetMouseButton::M_LEFT, cursorPos[0], cursorPos[1]);
@@ -764,6 +768,10 @@ void on_cursor_pos(GLFWwindow* window, double x, double y)
 {
 	cursorPos[0] = x;
 	cursorPos[1] = y;
+	ImGuiIO& io = ImGui::GetIO();
+    if (io.WantCaptureMouse) {
+        return;
+    }
 
 	m_myCameraManager->mouseMove(x, y);
 }
