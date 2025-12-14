@@ -31,6 +31,15 @@ vec4 withFog(vec4 color) {
     return colorWithFog;
 }
 
+vec4 applyGamma(vec4 color)
+{
+    // clamp to avoid NaNs
+    color.rgb = max(color.rgb, vec3(0.0));
+    // gamma = 2.0  (brightens the scene)
+    color.rgb = pow(color.rgb, vec3(0.5));
+    return color;
+}
+
 // Filter modes for debugging
 vec4 worldSpaceVertexFilter() {
     vec3 n = normalize(f_worldVertex);
@@ -68,9 +77,15 @@ vec4 blinnPhong(vec4 baseColor, vec3 N_in) {
     if (diff > 0.0)
         spec = pow(max(dot(N, H), 0.0), 32.0);
 
-    vec3 ambient = 0.2 * baseColor.rgb;
-    vec3 diffuse = diff * baseColor.rgb;
-    vec3 specular = 0.3 * spec * vec3(1.0);
+    const vec3 Ia = vec3(0.2);   // ambient
+    const vec3 Id = vec3(0.64);  // diffuse
+    const vec3 Is = vec3(0.16);  // specular
+
+    vec3 ambient = Ia * baseColor.rgb;
+    vec3 diffuse = Id * diff * baseColor.rgb;
+
+    // vec3 specular = 0.3 * spec * vec3(1.0);
+    vec3 specular = vec3(0.0);
 
     vec3 color = ambient + diffuse + specular;
     return vec4(color, baseColor.a);
@@ -128,7 +143,7 @@ void main() {
     vec4 lit = blinnPhong(texel, N);
     
     // Apply fog
-    fragColor = withFog(lit);
+    fragColor = applyGamma(withFog(lit));
     
     // For alpha blended foliage, preserve alpha
     if (hasAlphaTexture == 1) {

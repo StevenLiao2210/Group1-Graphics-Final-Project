@@ -37,6 +37,15 @@ vec4 withFog(vec4 color) {
     return colorWithFog;
 }
 
+vec4 applyGamma(vec4 color)
+{
+    // clamp to avoid NaNs
+    color.rgb = max(color.rgb, vec3(0.0));
+    // gamma = 2.0  (brightens the scene)
+    color.rgb = pow(color.rgb, vec3(0.5));
+    return color;
+}
+
 // filter
 vec4 worldSpaceVertexFilter() {
     vec3 n = normalize(f_worldVertex);
@@ -68,12 +77,12 @@ vec4 specularFilter() {
 
 
 // Generic Blinn-Phong using view-space N, V, light dir
-vec4 blinnPhong(vec4 baseColor, vec3 N_in) {
+vec4 blinnPhong(vec4 baseColor, vec3 N_in, float specScale = 1.0) {
     vec3 N = normalize(N_in);
     vec3 V = normalize(-f_viewVertex);           // camera at origin in view space
 
     // simple directional light in view space
-    vec3 L = normalize(vec3(0.3, 0.7, 0.2));
+    vec3 L = normalize(vec3(0.4, 0.5, 0.8));
     vec3 H = normalize(L + V);
 
     float diff = max(dot(N, L), 0.0);
@@ -82,18 +91,34 @@ vec4 blinnPhong(vec4 baseColor, vec3 N_in) {
     if (diff > 0.0)
         spec = pow(max(dot(N, H), 0.0), 32.0);   // shininess
 
-    vec3 ambient = 0.15 * baseColor.rgb;
-    vec3 diffuse = diff * baseColor.rgb;
-    vec3 specular = 0.5 * spec * vec3(1.0);
+    // light intensities from the slide
+    const vec3 Ia = vec3(0.2);   // ambient
+    const vec3 Id = vec3(0.64);  // diffuse
+    const vec3 Is = vec3(0.16);  // specular
+
+    vec3 ambient  = Ia * baseColor.rgb;
+    vec3 diffuse  = Id * diff * baseColor.rgb;
+    vec3 specular = Is * specScale * spec * vec3(1.0);
+    
+
+    // vec3 ambient = 0.15 * baseColor.rgb;
+    // vec3 diffuse = diff * baseColor.rgb;
+    // vec3 specular = 0.5 * spec * vec3(1.0);
 
     vec3 color = ambient + diffuse + specular;
     return vec4(color, baseColor.a);
 }
 
 // Terrain pass: textured + Blinn-Phong + fog
+// void terrainPass() {
+//     vec4 texel = texture(albedoTexture, f_uv.xy);
+//     vec4 lit   = blinnPhong(texel, f_viewNormal);
+//     fragColor  = withFog(lit);
+//     fragColor.a = 1.0;
+// }
 void terrainPass() {
     vec4 texel = texture(albedoTexture, f_uv.xy);
-    vec4 lit   = blinnPhong(texel, f_viewNormal);
+    vec4 lit   = blinnPhong(texel, f_viewNormal, 0.0);
     fragColor  = withFog(lit);
     fragColor.a = 1.0;
 }
@@ -128,7 +153,8 @@ void blinnPhongObject() {
     }
 
     vec4 lit  = blinnPhong(base, N);
-    fragColor = withFog(lit);
+    // fragColor = withFog(lit);
+    fragColor = applyGamma(withFog(lit));
 }
 void main() {
 
