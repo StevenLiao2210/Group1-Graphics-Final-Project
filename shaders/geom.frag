@@ -37,23 +37,37 @@ void main()
 
     // --- Normal mapping (Trice only when enabled) ---
     if (u_useNormalMap) {
-        // Build TBN in world space using derivatives
-        vec3 dp1  = dFdx(v_worldPos);
-        vec3 dp2  = dFdy(v_worldPos);
-        vec2 duv1 = dFdx(v_uv);
-        vec2 duv2 = dFdy(v_uv);
+    // Sample tangent-space normal
+    vec3 nTex = texture(u_normalMap, v_uv).xyz * 2.0 - 1.0;
 
-        float r = 1.0 / (duv1.x * duv2.y - duv1.y * duv2.x);
-        vec3 T = normalize((dp1 * duv2.y - dp2 * duv1.y) * r);
-        vec3 B = normalize((dp2 * duv1.x - dp1 * duv2.x) * r);
+    // If your normal map was authored in DirectX convention, flip green:
+    // (If it looks inverted/inside-out, enable this line)
+    nTex.y = -nTex.y;
 
-        vec3 nTex = texture(u_normalMap, v_uv).xyz * 2.0 - 1.0; // tangent-space
-        mat3 TBN  = mat3(T, B, N);
-        N = normalize(TBN * nTex);  // perturbed world-space normal
-    }
+    // Derivative-based tangent frame
+    vec3 dp1  = dFdx(v_worldPos);
+    vec3 dp2  = dFdy(v_worldPos);
+    vec2 duv1 = dFdx(v_uv);
+    vec2 duv2 = dFdy(v_uv);
+
+    // Robust tangent
+    vec3 T = normalize(dp1 * duv2.y - dp2 * duv1.y);
+
+    // Orthonormalize T to N (important!)
+    T = normalize(T - N * dot(N, T));
+
+    // Compute B from N and T, then match UV handedness
+    vec3 B = normalize(cross(N, T));
+    float handedness = (dot(cross(dp1, dp2), N) < 0.0) ? -1.0 : 1.0;
+    B *= handedness;
+
+    mat3 TBN = mat3(T, B, N);
+    N = normalize(TBN * nTex);
+}
+
 
     gPosition = vec4(v_worldPos, 1.0);
-    gNormal   = vec4(N, 0.0);
+    gNormal   = vec4(N, 1.0);
     gAmbient  = vec4(Ka, 1.0);   // now pure material ambient
     gDiffuse  = vec4(Kd, 1.0);
     gSpecular = vec4(u_Ks, u_Ns);
