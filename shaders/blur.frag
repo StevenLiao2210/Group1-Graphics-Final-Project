@@ -3,7 +3,7 @@ in vec2 v_uv;
 out vec4 FragColor;
 
 uniform sampler2D u_image;
-uniform bool      u_horizontal;
+uniform bool u_horizontal;
 
 void main()
 {

@@ -4,7 +4,7 @@ layout(location = 0) in vec3 a_pos;
 out vec3 v_worldPos;
 
 uniform mat4 u_model;
-uniform mat4 u_lightVP;   // per-face view-proj matrix
+uniform mat4 u_lightVP; 
 
 void main()
 {

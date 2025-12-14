@@ -1,49 +1,40 @@
 #version 410 core
 in vec2 v_uv;
 
-// 0 = final lighting (HDR color), 1 = bright parts for bloom
 layout(location = 0) out vec4 FragColor;
 layout(location = 1) out vec4 BrightColor;
 
-// G-buffers
 uniform sampler2D gPosition;
 uniform sampler2D gNormal;
 uniform sampler2D gAmbient;
 uniform sampler2D gDiffuse;
 uniform sampler2D gSpecular;
 
-// Camera & light
 uniform vec3 u_eye;
-uniform vec3 u_lightPos;   // point light position
+uniform vec3 u_lightPos;  
 uniform vec3 u_Ia;
 uniform vec3 u_Id;
 uniform vec3 u_Is;
 
-// Point light attenuation (constant, linear, quadratic)
 uniform float u_attConst;
 uniform float u_attLinear;
 uniform float u_attQuadratic;
 
-// ===== Point shadow cube =====
 uniform samplerCube u_shadowCube;
 uniform float       u_far;
 
-// ===== Directional shadow map =====
 uniform sampler2D u_dirShadowMap;
-uniform mat4      u_lightVP;       // light view-proj
-uniform vec3      u_lightDir;      // direction FROM surface TO light (world)
-uniform float     u_shadowStrength;
-uniform bool      u_enableShadows;
+uniform mat4 u_lightVP;       
+uniform vec3 u_lightDir;      
+uniform float u_shadowStrength;
+uniform bool u_enableShadows;
 
-// Bloom
-uniform bool  u_enableBloom;
+uniform bool u_enableBloom;
 uniform float u_bloomThreshold;
 
-// SSAO
-uniform bool      u_enableSSAO;
+uniform bool u_enableSSAO;
 uniform sampler2D u_ssaoTex;
 
-// ===== SSR =====
 uniform bool  u_enableSSR;
 uniform mat4  u_view;
 uniform mat4  u_proj;
@@ -53,22 +44,20 @@ uniform float u_ssrStep;
 uniform float u_ssrThickness;
 uniform float u_ssrIntensity;
 
-// Rectangular area light
 uniform vec3 u_rectCenter;
 uniform vec3 u_rectNormal;
 uniform vec3 u_rectTangent;
 uniform vec3 u_rectBitangent;
-uniform vec2 u_rectSize;       // full width/height
+uniform vec2 u_rectSize;       
 uniform vec3 u_rectColor;
 uniform int  u_rectSamples;
 uniform bool u_enableAreaLight;
 
-// Debug view mode:
+// Debug view mode
 // 0 = lighting, 1 = pos, 2 = normal, 3 = ambient,
 // 4 = diffuse, 5 = specular, 6 = SSAO
 uniform int u_viewMode;
 
-// ===== Toon / NPR =====
 uniform bool u_enableToon;
 uniform int  u_toonSteps;
 
@@ -77,9 +66,6 @@ uniform float u_edgeDepthThreshold;
 uniform float u_edgeNormalThreshold;
 uniform float u_edgeStrength;
 
-// ------------------------------------------------------------
-// Helpers
-// ------------------------------------------------------------
 float toonQuantize(float x, int steps)
 {
     steps = max(steps, 1);
@@ -88,20 +74,15 @@ float toonQuantize(float x, int steps)
     return floor(x * s + 0.5) / s;
 }
 
-// For toon highlight (optional “banded” spec)
 float toonSpec(float specPow)
 {
-    // specPow is already in [0,1] usually, but clamp anyway
     float s = clamp(specPow, 0.0, 1.0);
 
-    // 2-band highlight: adjust thresholds to taste
-    // You can also do multiple bands with toonQuantize().
     float hi = step(0.65, s);       // hard highlight
     float mid = step(0.35, s) * (1.0 - hi); // mid highlight
     return 0.0 + 0.5 * mid + 1.0 * hi;
 }
 
-// Sobel edge detection using depth + normal discontinuities
 float sobelEdge(vec2 uv)
 {
     vec2 texel = 1.0 / vec2(textureSize(gNormal, 0));
@@ -152,7 +133,6 @@ float sobelEdge(vec2 uv)
     return clamp(max(eD, eN), 0.0, 1.0);
 }
 
-// ---------- Directional shadow (2D) ----------
 float calcDirShadow(vec3 worldPos, vec3 N)
 {
     vec4 lp = u_lightVP * vec4(worldPos, 1.0);
@@ -178,7 +158,6 @@ float calcDirShadow(vec3 worldPos, vec3 N)
     return shadow;
 }
 
-// ---------- Point shadow (cube) ----------
 float calcPointShadow(vec3 worldPos)
 {
     vec3 L = worldPos - u_lightPos;
@@ -189,7 +168,6 @@ float calcPointShadow(vec3 worldPos)
     return (currentDepth - bias > closestDepth) ? 1.0 : 0.0;
 }
 
-// ---------- Area light (diffuse only, stable in HDR) ----------
 vec3 evalRectAreaLightDiffuse(vec3 pos, vec3 N, vec3 Kd)
 {
     const int MAX_SAMPLES = 32;
@@ -224,13 +202,11 @@ vec3 evalRectAreaLightDiffuse(vec3 pos, vec3 N, vec3 Kd)
         float NdotL = max(dot(N, wi), 0.0);
         if (NdotL <= 0.0) continue;
 
-        // one-sided emitter: only if sample is visible from front
         float NL_light = max(dot(-u_rectNormal, wi), 0.0);
         if (NL_light <= 0.0) continue;
 
         float G = (NdotL * NL_light) / d2;
 
-        // Toon: quantize N·L contribution (NOT the final color)
         if (u_enableToon) {
             // Use the NdotL term; keep geometric term continuous
             float q = toonQuantize(NdotL, u_toonSteps);
@@ -248,7 +224,6 @@ vec3 evalRectAreaLightDiffuse(vec3 pos, vec3 N, vec3 Kd)
     return Kd * radiance;
 }
 
-// ---------- SSR helpers ----------
 bool isFloorPixel(vec3 pos, vec3 normal)
 {
     float epsY = 0.2;
@@ -307,15 +282,12 @@ bool ssrSegmentOccluded(vec2 uv0, vec3 p0, vec2 uv1, vec3 p1)
     return false;
 }
 
-
-
 vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
 {
     vec3 N = normalize(normal);
     vec3 V = normalize(u_eye - pos);
     vec3 R = normalize(reflect(-V, N));
 
-    // start a tiny bit above the floor to avoid self hits
     vec3 rayOrigin = pos + N * 0.02;
 
     vec4 oClip = u_proj * u_view * vec4(rayOrigin, 1.0);
@@ -333,7 +305,6 @@ vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
 
         vec3 samplePos = rayOrigin + R * t;
 
-        // project to screen
         vec4 clip = u_proj * u_view * vec4(samplePos, 1.0);
         if (clip.w <= 0.0) { t += u_ssrStep; continue; }
 
@@ -349,36 +320,30 @@ vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
 
         vec3 sceneNormal = texture(gNormal, uv).xyz;
 
-        // don't reflect the floor into itself
         if (isFloorPixel(scenePos, sceneNormal)) { t += u_ssrStep; continue; }
 
-        // OPTIONAL: reject backfaces at the hit (reduces “see-through” under table)
-        // If the ray is hitting the back side of a surface in screen-space, skip it.
         if (dot(normalize(sceneNormal), -R) < 0.05) { t += u_ssrStep; continue; }
 
-        // ---- Correct depth test: compare VIEW-SPACE Z ----
         float zRay   = -(u_view * vec4(samplePos, 1.0)).z; // positive forward depth
         float zScene = -(u_view * vec4(scenePos,  1.0)).z;
 
         float diff = zRay - zScene; // >0 means ray is behind geometry at that uv
 
-        // if we crossed the surface, refine between previous and current t
         if (hasPrev && diff > 0.0 && diffPrev < 0.0)
         {
             float a = tPrev;
             float b = t;
 
-            // binary search a few iterations to reduce “striped” stepping artifacts
             for (int it = 0; it < 6; ++it)
             {
                 float m = 0.5 * (a + b);
-                vec3  mp = rayOrigin + R * m;
+                vec3 mp = rayOrigin + R * m;
 
-                vec4  c  = u_proj * u_view * vec4(mp, 1.0);
+                vec4 c  = u_proj * u_view * vec4(mp, 1.0);
                 if (c.w <= 0.0) { a = m; continue; }
 
-                vec3  n2 = c.xyz / c.w;
-                vec2  uv2 = n2.xy * 0.5 + 0.5;
+                vec3 n2 = c.xyz / c.w;
+                vec2 uv2 = n2.xy * 0.5 + 0.5;
 
                 vec3 sp2 = texture(gPosition, uv2).xyz;
                 if (sp2 == vec3(0.0)) { a = m; continue; }
@@ -391,7 +356,6 @@ vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
                 if (d2 > 0.0) b = m; else a = m;
             }
 
-            // use refined uv at b
             vec3 hitPos = rayOrigin + R * b;
             vec4 hitClip = u_proj * u_view * vec4(hitPos, 1.0);
             vec3 hitNdc = hitClip.xyz / hitClip.w;
@@ -408,7 +372,6 @@ vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
             vec3 hitScenePos = texture(gPosition, hitUV).xyz;
             if (hitScenePos == vec3(0.0)) { t += u_ssrStep; continue; }
 
-            // This is the important occlusion test:
             if (ssrSegmentOccluded(uv0, rayOrigin, hitUV, hitScenePos)) {
                 t += u_ssrStep;
                 continue;
@@ -428,7 +391,6 @@ vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
                 return hitKd; // emissive stored in Kd
             }
 
-            // re-light the hit (your existing approach)
             vec3 hN = normalize(texture(gNormal, hitUV).xyz);
             vec3 Ld = normalize(u_lightDir);
             vec3 V2 = normalize(u_eye - texture(gPosition, hitUV).xyz);
@@ -447,11 +409,10 @@ vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
             return ambient2 + diffuse2 + specular2;
         }
 
-        // “direct” thickness hit (when steps are small enough)
         if (diff > 0.0 && diff < u_ssrThickness)
         {
-            float zHit = -(u_view * vec4(scenePos, 1.0)).z; // scenePos must already be set above
-            float zMin = minNeighborDepth(uv);              // needs helper funcs outside computeSSR
+            float zHit = -(u_view * vec4(scenePos, 1.0)).z; 
+            float zMin = minNeighborDepth(uv);              
 
             if (zMin + 0.05 < zHit) { // try 0.03~0.08
                 // treat as no hit, keep marching
@@ -491,7 +452,6 @@ vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
             return ambient2 + diffuse2 + specular2;
         }
 
-        // advance
         tPrev = t;
         diffPrev = diff;
         hasPrev = true;
@@ -502,10 +462,6 @@ vec3 computeSSR(vec3 pos, vec3 normal, vec3 Ka, vec3 Kd, vec3 Ks, float NsRaw)
     return vec3(0.0);
 }
 
-
-// ------------------------------------------------------------
-// main
-// ------------------------------------------------------------
 void main()
 {
     vec3 pos      = texture(gPosition, v_uv).xyz;
@@ -525,7 +481,6 @@ void main()
         return;
     }
 
-    // Debug views
     if (u_viewMode == 1) { FragColor = vec4(normalize(pos) * 0.5 + 0.5, 1.0); BrightColor = vec4(0.0); return; }
     if (u_viewMode == 2) { FragColor = vec4(normalize(normal) * 0.5 + 0.5, 1.0); BrightColor = vec4(0.0); return; }
     if (u_viewMode == 3) { FragColor = vec4(Ka, 1.0); BrightColor = vec4(0.0); return; }
@@ -536,7 +491,6 @@ void main()
         FragColor = vec4(vec3(aoDbg), 1.0); BrightColor = vec4(0.0); return;
     }
 
-    // Emissive (area rect / light spheres)
     if (isEmissive) {
         vec3 emissive = Kd;
         FragColor = vec4(emissive, 1.0);
@@ -556,14 +510,10 @@ void main()
     float ao = 1.0;
     if (u_enableSSAO) ao = texture(u_ssaoTex, v_uv).r;
 
-    // Ambient (keep smooth even in toon)
     vec3 ambient = (Ka * Kd) * u_Ia * ao;
 
     float s = clamp(u_shadowStrength, 0.0, 1.0);
 
-    // --------------------------------------------------------
-    // Point light
-    // --------------------------------------------------------
     vec3 Lp = normalize(u_lightPos - pos);
     vec3 Hp = normalize(Lp + V);
 
@@ -572,7 +522,6 @@ void main()
 
     vec3 pointDiffuse = u_Id * Kd * qLp;
 
-    // Spec: normal or toon-banded
     vec3 pointSpecular = vec3(0.0);
     if (NdotLp > 0.0) {
         float specPow = pow(max(dot(N, Hp), 0.0), Ns);
@@ -590,9 +539,6 @@ void main()
     if (u_enableShadows) pointShadow = calcPointShadow(pos);
     vec3 pointWithShadow = directPoint * mix(s, 1.0, 1.0 - pointShadow);
 
-    // --------------------------------------------------------
-    // Directional light
-    // --------------------------------------------------------
     vec3 Ld = normalize(u_lightDir);
     vec3 Hd = normalize(Ld + V);
 
@@ -614,30 +560,23 @@ void main()
     if (u_enableShadows) dirShadow = calcDirShadow(pos, N);
     vec3 dirWithShadow = directDir * mix(s, 1.0, 1.0 - dirShadow);
 
-    // --------------------------------------------------------
-    // Rect area light (diffuse only)
-    // --------------------------------------------------------
     vec3 directArea = vec3(0.0);
     if (u_enableAreaLight) {
         directArea = evalRectAreaLightDiffuse(pos, N, Kd) * u_Id;
     }
 
-    // Final lighting (HDR)
     vec3 lighting = ambient + pointWithShadow + dirWithShadow + directArea;
 
-    // Edge darkening (post-light)
     if (u_enableEdges) {
         float e = sobelEdge(v_uv);
         lighting *= (1.0 - e * u_edgeStrength);
     }
 
-    // SSR (apply after edges; don’t toon-quantize SSR itself)
     if (u_enableSSR && isFloorPixel(pos, normal)) {
         vec3 refl = computeSSR(pos, normal, Ka, Kd, Ks, NsRaw);
         lighting = mix(lighting, refl, u_ssrIntensity);
     }
 
-    // Bloom bright-pass (use HDR lighting)
     vec3 bright = vec3(0.0);
     if (u_enableBloom) {
         float b = max(max(lighting.r, lighting.g), lighting.b);

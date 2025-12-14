@@ -16,7 +16,7 @@ void main()
     vec4 wp = u_model * vec4(a_pos, 1.0);
     v_worldPos  = wp.xyz;
     v_worldNorm = mat3(transpose(inverse(u_model))) * a_norm;
-    v_uv        = a_uv;
+    v_uv = a_uv;
 
     gl_Position = u_proj * u_view * wp;
 }

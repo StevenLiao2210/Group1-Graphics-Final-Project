@@ -9,7 +9,6 @@ void main()
     vec2 texel = 1.0 / vec2(textureSize(u_ssaoInput, 0));
     float result = 0.0;
 
-    // simple 4x4 box blur (fast + good enough for assignment)
     for (int y = -2; y <= 1; ++y)
     for (int x = -2; x <= 1; ++x)
     {

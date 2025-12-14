@@ -2,13 +2,13 @@
 in vec2 v_uv;
 out vec4 FragColor;
 
-uniform sampler2D u_scene;         // occlusion buffer
-uniform vec2      u_lightScreenPos;
-uniform int       u_numSamples;
-uniform float     u_exposure;
-uniform float     u_decay;
-uniform float     u_density;
-uniform float     u_weight;
+uniform sampler2D u_scene;      
+uniform vec2 u_lightScreenPos;
+uniform int u_numSamples;
+uniform float u_exposure;
+uniform float u_decay;
+uniform float u_density;
+uniform float u_weight;
 
 void main()
 {

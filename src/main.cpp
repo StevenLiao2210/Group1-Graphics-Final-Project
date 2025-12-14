@@ -18,31 +18,22 @@
 #include <fstream>
 #include <sstream>
 
-// ==============================
-// stb_image + tinyobjloader
-// ==============================
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
 
-// ==============================
-// Globals
-// ==============================
 ImVec4 g_clearColor = ImVec4(0.1f, 0.1f, 0.12f, 1.0f);
 
-// Camera (initial values from assignment)
 glm::vec3 g_eye = glm::vec3(4.0f, 1.0f, -1.5f);
 glm::vec3 g_center = glm::vec3(3.0f, 1.0f, -1.5f);
 glm::vec3 g_up = glm::vec3(0.0f, 1.0f, 0.0f);
-float     g_fov = 45.0f;
+float g_fov = 45.0f;
 
-// Mouse orbit
-bool   g_mouseRot = false;
+bool g_mouseRot = false;
 double g_lastX = 0.0, g_lastY = 0.0;
 
-// Shader programs
 GLuint g_geomProgram = 0; // geometry (G-buffer) pass
 GLuint g_lightProgram = 0; // lighting pass
 GLuint g_depthProgram = 0; // shadow-map depth pass
@@ -50,24 +41,16 @@ GLuint g_blurProgram = 0; // gaussian blur for bloom
 GLuint g_finalProgram = 0; // final combine pass
 GLuint g_volRaymarchProgram = 0; //volumetric lighting
 
-
-
-// ==============================
-// Directional shadow mapping
-// ==============================
 GLuint g_dirShadowFBO = 0;
 GLuint g_dirShadowTex = 0;
 const int DIR_SHADOW_SIZE = 1024;
 //const int DIR_SHADOW_SIZE = 4096;
 
 
-glm::mat4 g_lightVP = glm::mat4(1.0f); // light view-projection for directional shadow
+glm::mat4 g_lightVP = glm::mat4(1.0f); 
 
 GLuint g_dirDepthProgram = 0;
 
-// ==============================
-// Directional light camera (NEW / separate feature)
-// ==============================
 glm::vec3 g_dirLightEye = glm::vec3(-2.845f, 2.028f, -1.293f);
 glm::vec3 g_dirLightCenter = glm::vec3(0.542f, -0.141f, -0.422f);
 glm::vec3 g_dirLightUp = glm::vec3(0.0f, 1.0f, 0.0f);
@@ -78,7 +61,6 @@ float g_dirLightRange = 5.0f;
 
 glm::mat4 g_dirLightVP = glm::mat4(1.0f);
 
-// Shadow mapping globals
 GLuint g_shadowFBO = 0;
 GLuint g_shadowTex = 0;
 const int SHADOW_MAP_SIZE = 1024;
@@ -88,51 +70,41 @@ const float g_pointShadowFar = 20.0f;
 
 glm::mat4 g_pointShadowMatrices[6];
 
-// point light
 //glm::vec3 g_lightEye = glm::vec3(1.87659f, 0.4625f, 0.103928f);
 glm::vec3 g_pointLightPos = glm::vec3(1.87659f, 0.4625f, 0.103928f);
 //glm::vec3 g_pointLightPos = glm::vec3(-2.845f * 5.0f, 2.028f * 2.5f, -1.293f * 5.0f);
 
 glm::vec3 g_lightCenter = glm::vec3(0.0f, 0.5f, 0.0f);
 glm::vec3 g_lightUp = glm::vec3(0.0f, 1.0f, 0.0f);
-float     g_lightNear = 0.1f;
-float     g_lightFar = 10.0f;
-float     g_lightRange = 5.0f;  // ortho box half-size
+float g_lightNear = 0.1f;
+float g_lightFar = 10.0f;
+float g_lightRange = 5.0f; 
 
 
 GLuint g_shadowTexA = 0; // point light
 GLuint g_shadowTexB = 0; // demo light (or 2nd point light)
 
-
-// Point light sphere (visual)
 GLuint g_lightSphereVAO = 0;
 GLuint g_lightSphereVBO = 0;
 GLuint g_lightSphereEBO = 0;
 GLsizei g_lightSphereIndexCount = 0;
 
-const float g_lightSphereRadius = 0.22f;  // from assignment
+const float g_lightSphereRadius = 0.22f;  
 
-// Rectangular area light mesh (visible emitter)
 GLuint g_areaRectVAO = 0;
 GLuint g_areaRectVBO = 0;
 GLuint g_areaRectEBO = 0;
 GLsizei g_areaRectIndexCount = 0;
 
-// Shadow strength + toggle (debug / tuning)
 float g_shadowStrength = 0.0f;  // 0 = fully black shadow, 1 = no shadow dimming
-bool  g_enableShadows = true;
+bool g_enableShadows = true;
 
-// Triceratops transform (editable in ImGui)
 glm::vec3 g_tricePos = glm::vec3(2.05f, 0.628725f, -1.9f);
-float     g_triceScale = 0.001f;
-float     g_triceYaw = 0.0f;   // degrees
+float g_triceScale = 0.001f;
+float g_triceYaw = 0.0f;   
 
-// First mesh index that belongs to triceratops
 size_t g_triceFirstMesh = (size_t)-1;
 
-// ==============================
-// G-buffer (Deferred shading)
-// ==============================
 GLuint g_gbufferFBO = 0;
 GLuint g_gPositionTex = 0;
 GLuint g_gNormalTex = 0;
@@ -140,16 +112,14 @@ GLuint g_gAmbientTex = 0;
 GLuint g_gDiffuseTex = 0;
 GLuint g_gSpecularTex = 0;
 GLuint g_gDepthRBO = 0;
-int    g_gbufferWidth = 0;
-int    g_gbufferHeight = 0;
+int g_gbufferWidth = 0;
+int g_gbufferHeight = 0;
 int g_viewMode = 0;
 
-// Fullscreen quad for lighting pass
 GLuint g_quadVAO = 0;
 GLuint g_quadVBO = 0;
 
-//Normal Mapping
-bool   g_enableNormalMap = true;
+bool g_enableNormalMap = true;
 GLuint g_triceNormalTex = 0;
 
 GLuint g_hdrFBO = 0;
@@ -157,90 +127,74 @@ GLuint g_hdrColorTex = 0;
 GLuint g_brightColorTex = 0;
 GLuint g_pingpongFBO[2] = { 0, 0 };
 GLuint g_pingpongTex[2] = { 0, 0 };
-int    g_bloomWidth = 0;
-int    g_bloomHeight = 0;
+int g_bloomWidth = 0;
+int g_bloomHeight = 0;
 
-bool   g_enableBloom = true;
-float  g_bloomThreshold = 0.8f;
-float  g_bloomIntensity = 0.8f;
-float  g_exposure = 1.5f;
-int    g_blurIterations = 15;
+bool g_enableBloom = true;
+float g_bloomThreshold = 0.8f;
+float g_bloomIntensity = 0.8f;
+float g_exposure = 1.5f;
+int g_blurIterations = 15;
 
-// ==============================
-// SSAO
-// ==============================
 GLuint g_ssaoProgram = 0;
 GLuint g_ssaoFBO = 0;
 GLuint g_ssaoTex = 0;
 GLuint g_ssaoNoiseTex = 0;
 
 std::vector<glm::vec3> g_ssaoKernel;
-int   g_ssaoWidth = 0;
-int   g_ssaoHeight = 0;
+int g_ssaoWidth = 0;
+int g_ssaoHeight = 0;
 
-bool  g_enableSSAO = true;
+bool g_enableSSAO = true;
 
 const int   SSAO_KERNEL_SIZE = 64;
-float g_ssaoRadius = 0.5f;    // spec
-float g_ssaoBias = 0.025f;  // spec
+float g_ssaoRadius = 0.5f;  
+float g_ssaoBias = 0.025f; 
 
 GLuint g_ssaoBlurProgram = 0;
 GLuint g_ssaoBlurFBO = 0;
 GLuint g_ssaoBlurTex = 0;
 
-
-// ==============================
-// Screen-Space Reflection (SSR)
-// ==============================
-bool  g_enableSSR = true;   // toggle
+bool  g_enableSSR = true;   
 float g_ssrMaxDistance = 6.0f;   // how far the ray can travel
 int   g_ssrMaxSteps = 40;     // how many steps
 float g_ssrStep = 0.15f;  // distance between samples
 float g_ssrThickness = 0.15f;  // depth tolerance for hit
 float g_ssrIntensity = 0.8f;   // how strong the reflection is
 
-// ==============================
-// Mesh struct
-// ==============================
 struct Mesh {
     GLuint vao = 0;
     GLuint vbo = 0;
     GLuint ebo = 0;
     GLsizei indexCount = 0;
 
-    GLuint    diffuseTex = 0;             // map_Kd
+    GLuint diffuseTex = 0;             // map_Kd
     glm::vec3 Ka = glm::vec3(0.1f);       // ambient
     glm::vec3 Kd = glm::vec3(5.0f);       // diffuse
     glm::vec3 Ks = glm::vec3(0.0f);       // specular
-    float     Ns = 32.0f;                 // shininess
+    float Ns = 32.0f;                 // shininess
 
     glm::mat4 model = glm::mat4(1.0f);    // base model (room uses this; trice overridden at draw)
 };
 
 std::vector<Mesh> g_meshes;
 
-// ==============================
-// Rectangular area light (world-space)
-// ==============================
 glm::vec3 g_areaCenter = glm::vec3(1.0f, 0.5f, -0.5f); // given
 glm::vec2 g_areaSize = glm::vec2(1.0f, 1.0f);        // width, height
 glm::vec3 g_areaEuler = glm::vec3(180.0f, 0.0f, 0.0f);  // pitch, yaw, roll in deg
 glm::vec3 g_areaColor = glm::vec3(0.8f, 0.6f, 0.0f);  // given color
-int       g_areaSamples = 16;                          // 4x4 stratified samples
-bool      g_enableAreaLight = true;
+int g_areaSamples = 16;                          // 4x4 stratified samples
+bool g_enableAreaLight = true;
 
-// ==============================
-// Volumetric light scattering ("God Rays")
-// ==============================
 GLuint g_volumetricFBO = 0;
 GLuint g_volumetricTex = 0;
-int    g_volWidth = 0;
-int    g_volHeight = 0;
+int g_volWidth = 0;
+int g_volHeight = 0;
 GLuint g_volumetricProgram = 0;
 
-bool  g_enableVolumetric = false;
-int   g_volNumSamples = 100;      // demo spec
-float g_volExposure = 0.2f;     // exposure in formula
+bool g_enableVolumetric = false;
+int g_volNumSamples = 100;     
+float g_volExposure = 0.2f;     
 float g_volDecay = 0.96815f; // decay
 float g_volDensity = 0.926f;   // density
 float g_volWeight = 0.58767f; // weight
@@ -249,30 +203,22 @@ float g_volIntensity = 1.0f;     // how strong in final image
 float g_volThreshold = 0.7f;   // brightness threshold
 float g_volSourceRadius = 0.05f;  // on-screen radius around light
 
-// Demo "sun" light for volumetric (from spec)
-bool      g_useDemoVolLight = true;
+bool g_useDemoVolLight = true;
 glm::vec3 g_volDemoLightPos(
     -2.845f * 5.0f,
     2.028f * 2.5f,
     -1.293f * 5.0f
 );
-bool      g_showVolDemoSphere = true;
+bool g_showVolDemoSphere = true;
 
-
-// ==============================
-// NPR / Toon shading + Edges
-// ==============================
 bool  g_enableToon = true;
-int   g_toonSteps = 3;     // spec says 3
+int   g_toonSteps = 3;   
 bool  g_enableEdges = true;
 
 float g_edgeDepthThreshold = 0.10f; // tune
 float g_edgeNormalThreshold = 1.0f; // tune
 float g_edgeStrength = 1.0f;         // 0..1
 
-// ==============================
-// TRUE volumetric fog (raymarch)
-// ==============================
 bool  g_enableVolFog = true;
 
 int   g_volSteps = 256;
@@ -300,7 +246,6 @@ GLuint g_occDepth = 0;
 int g_occW = 0, g_occH = 0;
 
 GLuint g_colorProgram = 0; // simple shader: output uniform color
-
 
 static void initOcclusionBuffer(int w, int h) {
     w = std::max(1, w / 2);
@@ -372,10 +317,9 @@ static void initDirectionalShadowMap()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
-    // Crucial for directional shadows at edges:
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-    float border[4] = { 1,1,1,1 }; // outside = lit (depth = 1)
+    float border[4] = { 1,1,1,1 }; 
     glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
 
     glBindFramebuffer(GL_FRAMEBUFFER, g_dirShadowFBO);
@@ -389,18 +333,11 @@ static void initDirectionalShadowMap()
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-
-// ==============================
-// GLFW error callback
-// ==============================
 static void glfw_error_callback(int error, const char* description)
 {
     fprintf(stderr, "GLFW Error %d: %s\n", error, description);
 }
 
-// ==============================
-// Texture loading helpers
-// ==============================
 static GLuint loadTexture2D(const std::string& path)
 {
     int w, h, n;
@@ -459,17 +396,14 @@ static GLuint loadTexture2D(const std::string& path)
     return tex;
 }
 
-// Try full texName path relative to baseDir, then filename-only
 static GLuint loadTextureSmart(const std::string& baseDir, const std::string& texName)
 {
     if (texName.empty()) return 0;
 
-    // 1) As-is relative to baseDir
     std::string full1 = baseDir + texName;
     GLuint tex = loadTexture2D(full1);
     if (tex) return tex;
 
-    // 2) Only filename in same dir as OBJ
     size_t pos = texName.find_last_of("/\\");
     std::string fileOnly = (pos == std::string::npos ? texName : texName.substr(pos + 1));
     std::string full2 = baseDir + fileOnly;
@@ -482,9 +416,6 @@ static GLuint loadTextureSmart(const std::string& baseDir, const std::string& te
     return 0;
 }
 
-// ==============================
-// Shader compilation
-// ==============================
 static GLuint compileShader(GLenum type, const char* src)
 {
     GLuint s = glCreateShader(type);
@@ -529,9 +460,6 @@ static GLuint createProgram(const char* vsSrc, const char* fsSrc)
     return prog;
 }
 
-// ==============================
-// OBJ loader (appends meshes to g_meshes)
-// ==============================
 static void loadOBJScene(const std::string& objPath, const glm::mat4& modelMatrix)
 {
     tinyobj::ObjReaderConfig config;
@@ -706,9 +634,6 @@ static void loadOBJScene(const std::string& objPath, const glm::mat4& modelMatri
         << " (total meshes: " << g_meshes.size() << ")\n";
 }
 
-// ==============================
-// Shadow map init
-// ==============================
 static void initShadowMap()
 {
     glGenFramebuffers(1, &g_shadowFBO);
@@ -729,7 +654,7 @@ static void initShadowMap()
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
 
     glBindFramebuffer(GL_FRAMEBUFFER, g_shadowFBO);
-    // Attach one face just to validate FBO; we'll reattach per-face later
+
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
         GL_TEXTURE_CUBE_MAP_POSITIVE_X, g_shadowTex, 0);
     glDrawBuffer(GL_NONE);
@@ -757,11 +682,9 @@ static void initBloomBuffers(int width, int height)
     glDeleteTextures(2, g_pingpongTex);
     glDeleteFramebuffers(2, g_pingpongFBO);
 
-    // HDR FBO (scene + bright)
     glGenFramebuffers(1, &g_hdrFBO);
     glBindFramebuffer(GL_FRAMEBUFFER, g_hdrFBO);
 
-    // Scene color (HDR)
     glGenTextures(1, &g_hdrColorTex);
     glBindTexture(GL_TEXTURE_2D, g_hdrColorTex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
@@ -775,7 +698,6 @@ static void initBloomBuffers(int width, int height)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
         GL_TEXTURE_2D, g_hdrColorTex, 0);
 
-    // Bright color (HDR)
     glGenTextures(1, &g_brightColorTex);
     glBindTexture(GL_TEXTURE_2D, g_brightColorTex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
@@ -798,7 +720,6 @@ static void initBloomBuffers(int width, int height)
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    // Ping-pong FBOs for blur
     glGenFramebuffers(2, g_pingpongFBO);
     glGenTextures(2, g_pingpongTex);
     for (int i = 0; i < 2; ++i) {
@@ -827,7 +748,6 @@ static void initSSAOKernelAndNoise()
     if (!g_ssaoKernel.empty())
         return;
 
-    // Kernel
     std::uniform_real_distribution<float> rnd(0.0f, 1.0f);
     std::default_random_engine           gen;
 
@@ -836,11 +756,10 @@ static void initSSAOKernelAndNoise()
         glm::vec3 sample(
             rnd(gen) * 2.0f - 1.0f,
             rnd(gen) * 2.0f - 1.0f,
-            rnd(gen));        // hemisphere (z >= 0)
+            rnd(gen));       
         sample = glm::normalize(sample);
-        sample *= rnd(gen);   // scale by random [0,1]
+        sample *= rnd(gen);   
 
-        // bias samples closer to origin
         float scale = float(i) / float(SSAO_KERNEL_SIZE);
         scale = glm::mix(0.1f, 1.0f, scale * scale);
         sample *= scale;
@@ -848,7 +767,6 @@ static void initSSAOKernelAndNoise()
         g_ssaoKernel.push_back(sample);
     }
 
-    // Noise texture (4x4)
     std::vector<glm::vec3> noiseData;
     noiseData.reserve(16);
     for (int i = 0; i < 16; ++i) {
@@ -965,11 +883,6 @@ static void initVolumetricBuffer(int width, int height)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-
-
-// ==============================
-// G-buffer init / resize
-// ==============================
 static void initGBuffer(int width, int height)
 {
     if (width <= 0 || height <= 0) return;
@@ -977,7 +890,6 @@ static void initGBuffer(int width, int height)
     g_gbufferWidth = width;
     g_gbufferHeight = height;
 
-    // Delete old resources if they exist
     if (g_gPositionTex) glDeleteTextures(1, &g_gPositionTex);
     if (g_gNormalTex)   glDeleteTextures(1, &g_gNormalTex);
     if (g_gAmbientTex)  glDeleteTextures(1, &g_gAmbientTex);
@@ -989,7 +901,6 @@ static void initGBuffer(int width, int height)
     glGenFramebuffers(1, &g_gbufferFBO);
     glBindFramebuffer(GL_FRAMEBUFFER, g_gbufferFBO);
 
-    // Position (RGBA16F)
     glGenTextures(1, &g_gPositionTex);
     glBindTexture(GL_TEXTURE_2D, g_gPositionTex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F,
@@ -999,7 +910,6 @@ static void initGBuffer(int width, int height)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
         GL_TEXTURE_2D, g_gPositionTex, 0);
 
-    // Normal (RGBA16F)
     glGenTextures(1, &g_gNormalTex);
     glBindTexture(GL_TEXTURE_2D, g_gNormalTex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F,
@@ -1009,7 +919,6 @@ static void initGBuffer(int width, int height)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
         GL_TEXTURE_2D, g_gNormalTex, 0);
 
-    // Ambient (RGBA8)
     glGenTextures(1, &g_gAmbientTex);
     glBindTexture(GL_TEXTURE_2D, g_gAmbientTex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
@@ -1019,7 +928,6 @@ static void initGBuffer(int width, int height)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2,
         GL_TEXTURE_2D, g_gAmbientTex, 0);
 
-    // Diffuse (RGBA8)
     glGenTextures(1, &g_gDiffuseTex);
     glBindTexture(GL_TEXTURE_2D, g_gDiffuseTex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
@@ -1029,7 +937,6 @@ static void initGBuffer(int width, int height)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3,
         GL_TEXTURE_2D, g_gDiffuseTex, 0);
 
-    // Specular (RGBA16F – RGB = Ks, A = Ns)
     glGenTextures(1, &g_gSpecularTex);
     glBindTexture(GL_TEXTURE_2D, g_gSpecularTex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F,
@@ -1039,7 +946,6 @@ static void initGBuffer(int width, int height)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT4,
         GL_TEXTURE_2D, g_gSpecularTex, 0);
 
-    // Depth buffer
     glGenRenderbuffers(1, &g_gDepthRBO);
     glBindRenderbuffer(GL_RENDERBUFFER, g_gDepthRBO);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
@@ -1067,15 +973,11 @@ static void initGBuffer(int width, int height)
 
 }
 
-// ==============================
-// Fullscreen quad
-// ==============================
 static void initFullscreenQuad()
 {
     if (g_quadVAO != 0) return;
 
     float quadVerts[] = {
-        // positions   // uvs
         -1.0f, -1.0f,  0.0f, 0.0f,
          1.0f, -1.0f,  1.0f, 0.0f,
         -1.0f,  1.0f,  0.0f, 1.0f,
@@ -1171,9 +1073,6 @@ static void initLightSphere()
     glBindVertexArray(0);
 }
 
-// ==============================
-// Area rectangle mesh init
-// ==============================
 static void initAreaRectMesh()
 {
     if (g_areaRectVAO != 0) return;
@@ -1184,7 +1083,6 @@ static void initAreaRectMesh()
         glm::vec2 uv;
     };
 
-    // Unit quad in local space, in the XY plane, facing +Z
     V verts[4] = {
         { glm::vec3(-1.0f, -1.0f, 0.0f), glm::vec3(0, 0, 1), glm::vec2(0.0f, 0.0f) },
         { glm::vec3(1.0f, -1.0f, 0.0f), glm::vec3(0, 0, 1), glm::vec2(1.0f, 0.0f) },
@@ -1219,7 +1117,6 @@ static void initAreaRectMesh()
     glBindVertexArray(0);
 }
 
-// Helper to get current trice model matrix
 static glm::mat4 getTriceModel()
 {
     glm::mat4 m(1.0f);
@@ -1229,24 +1126,20 @@ static glm::mat4 getTriceModel()
     return m;
 }
 
-// Area rectangle model matrix (matching area light basis)
 static glm::mat4 getAreaRectModel()
 {
     glm::mat4 M(1.0f);
 
-    // Translate to center
     M = glm::translate(M, g_areaCenter);
 
-    // Same rotation order as buildAreaLightBasis()
     float pitch = glm::radians(g_areaEuler.x);
     float yaw = glm::radians(g_areaEuler.y);
     float roll = glm::radians(g_areaEuler.z);
 
-    M = glm::rotate(M, yaw, glm::vec3(0, 1, 0)); // Yaw
-    M = glm::rotate(M, pitch, glm::vec3(1, 0, 0)); // Pitch
-    M = glm::rotate(M, roll, glm::vec3(0, 0, 1)); // Roll
+    M = glm::rotate(M, yaw, glm::vec3(0, 1, 0)); 
+    M = glm::rotate(M, pitch, glm::vec3(1, 0, 0)); 
+    M = glm::rotate(M, roll, glm::vec3(0, 0, 1)); 
 
-    // Scale unit quad [-1,1]x[-1,1] -> actual size (width, height)
     M = glm::scale(M, glm::vec3(g_areaSize.x * 0.5f,
         g_areaSize.y * 0.5f,
         1.0f));
@@ -1254,11 +1147,6 @@ static glm::mat4 getAreaRectModel()
     return M;
 }
 
-// ==============================
-// Rendering
-// ==============================
-
-// Build the 6 view-projection matrices for the point light
 static void buildPointShadowMatrices(const glm::vec3& lightPos)
 {
     glm::mat4 proj = glm::perspective(glm::radians(90.0f),
@@ -1280,7 +1168,6 @@ static void buildPointShadowMatrices(const glm::vec3& lightPos)
         glm::lookAt(lightPos, lightPos + glm::vec3(0, 0, -1), glm::vec3(0, -1, 0));
 }
 
-// Depth pass: render scene into cube shadow map
 static void renderShadowPass(const glm::vec3& lightPos, GLuint targetCubeTex)
 {
     buildPointShadowMatrices(lightPos);
@@ -1302,9 +1189,8 @@ static void renderShadowPass(const glm::vec3& lightPos, GLuint targetCubeTex)
     glm::mat4 triceModel = getTriceModel();
 
     glEnable(GL_CULL_FACE);
-    glCullFace(GL_FRONT); // helps reduce acne
+    glCullFace(GL_FRONT); 
 
-    // Render for each cube face
     for (int face = 0; face < 6; ++face) {
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
             GL_TEXTURE_CUBE_MAP_POSITIVE_X + face,
@@ -1336,15 +1222,14 @@ static void renderShadowPass(const glm::vec3& lightPos, GLuint targetCubeTex)
 
 static void buildAreaLightBasis(glm::vec3& outNormal, glm::vec3& outTangent, glm::vec3& outBitangent)
 {
-    // Start as a +Z facing quad
     glm::mat4 R(1.0f);
     float pitch = glm::radians(g_areaEuler.x); // rotate around X
     float yaw = glm::radians(g_areaEuler.y); // rotate around Y
     float roll = glm::radians(g_areaEuler.z); // rotate around Z
 
-    R = glm::rotate(R, yaw, glm::vec3(0, 1, 0)); // Yaw
-    R = glm::rotate(R, pitch, glm::vec3(1, 0, 0)); // Pitch
-    R = glm::rotate(R, roll, glm::vec3(0, 0, 1)); // Roll
+    R = glm::rotate(R, yaw, glm::vec3(0, 1, 0)); 
+    R = glm::rotate(R, pitch, glm::vec3(1, 0, 0)); 
+    R = glm::rotate(R, roll, glm::vec3(0, 0, 1)); 
 
     outNormal = glm::normalize(glm::vec3(R * glm::vec4(0, 0, 1, 0)));
     outTangent = glm::normalize(glm::vec3(R * glm::vec4(1, 0, 0, 0)));
@@ -1353,10 +1238,8 @@ static void buildAreaLightBasis(glm::vec3& outNormal, glm::vec3& outTangent, glm
 
 static void renderDirectionalShadowPass()
 {
-    // Build light view/proj from your spec-controlled globals:
     glm::mat4 lightView = glm::lookAt(g_dirLightEye, g_dirLightCenter, g_dirLightUp);
 
-    // Ortho “range” box (Range = 5 means [-5,5] on x/y in light space)
     glm::mat4 lightProj = glm::ortho(-g_dirLightRange, g_dirLightRange,
         -g_dirLightRange, g_dirLightRange,
         g_dirLightNear, g_dirLightFar);
@@ -1376,7 +1259,6 @@ static void renderDirectionalShadowPass()
 
     glm::mat4 triceModel = getTriceModel();
 
-    // Optional: slope acne reduction trick
     glEnable(GL_CULL_FACE);
     glCullFace(GL_FRONT);
 
@@ -1399,13 +1281,11 @@ static void renderDirectionalShadowPass()
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-
-// Main display: deferred shading pipeline
 static void on_display(GLFWwindow* window)
 {
 
     glm::vec3 lightA = g_pointLightPos;
-    glm::vec3 lightB = g_volDemoLightPos; // or another real point light
+    glm::vec3 lightB = g_volDemoLightPos; 
 
     renderShadowPass(lightA, g_shadowTexA);
     renderShadowPass(lightB, g_shadowTexB);
@@ -1413,7 +1293,6 @@ static void on_display(GLFWwindow* window)
     int display_w, display_h;
     glfwGetFramebufferSize(window, &display_w, &display_h);
 
-    // Resize G-buffer if needed
     if (display_w != g_gbufferWidth || display_h != g_gbufferHeight) {
         initGBuffer(display_w, display_h);
         initOcclusionBuffer(display_w, display_h);
@@ -1423,16 +1302,13 @@ static void on_display(GLFWwindow* window)
     glm::mat4 proj = glm::perspective(glm::radians(g_fov), aspect, 0.1f, 100.0f);
     glm::mat4 view = glm::lookAt(g_eye, g_center, g_up);
 
-    glm::vec3 lightPos = g_pointLightPos; // point light position follows sphere
+    glm::vec3 lightPos = g_pointLightPos; 
 
-    // 1) Shadow pass (point light cube)
     renderDirectionalShadowPass();
 
     /*renderShadowPass(lightPos);
     renderShadowPass(g_volDemoLightPos);*/
 
-
-    // 2) Geometry pass -> G-buffers
     glBindFramebuffer(GL_FRAMEBUFFER, g_gbufferFBO);
     glViewport(0, 0, g_gbufferWidth, g_gbufferHeight);
     glEnable(GL_DEPTH_TEST);
@@ -1478,7 +1354,7 @@ static void on_display(GLFWwindow* window)
 
         if (isTrice) {
             Kd = glm::vec3(0.2f, 0.9f, 0.2f);
-            useTex = false; // keep solid green dino in deferred too
+            useTex = false; 
         }
 
         glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Ka"), 1, glm::value_ptr(Ka));
@@ -1496,7 +1372,6 @@ static void on_display(GLFWwindow* window)
         glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, 0);
     }
 
-    // ---- Emissive Area Rect (visible rectangle light) ----
     if (g_areaRectVAO != 0 && g_enableAreaLight)
     {
         glm::mat4 model = getAreaRectModel();
@@ -1506,10 +1381,10 @@ static void on_display(GLFWwindow* window)
         glUniformMatrix4fv(glGetUniformLocation(g_geomProgram, "u_model"),
             1, GL_FALSE, glm::value_ptr(model));
 
-        glm::vec3 Kd = g_areaColor * 20.0f;  // tweak for bloom
+        glm::vec3 Kd = g_areaColor * 20.0f;  
         glm::vec3 Ka = glm::vec3(0.0f);
         glm::vec3 Ks = glm::vec3(0.0f);
-        float Ns = -1.0f;                    // negative => emissive
+        float Ns = -1.0f;                    
 
         glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Ka"), 1, glm::value_ptr(Ka));
         glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Kd"), 1, glm::value_ptr(Kd));
@@ -1522,11 +1397,10 @@ static void on_display(GLFWwindow* window)
         glDrawElements(GL_TRIANGLES, g_areaRectIndexCount, GL_UNSIGNED_INT, 0);
     }
 
-    // ---- Emissive Point Light Sphere ----
     if (g_lightSphereVAO != 0)
     {
         glm::mat4 model(1.0f);
-        model = glm::translate(model, g_pointLightPos);     // same position as point light
+        model = glm::translate(model, g_pointLightPos);     
         model = glm::scale(model, glm::vec3(g_lightSphereRadius));
 
         glBindVertexArray(g_lightSphereVAO);
@@ -1534,11 +1408,10 @@ static void on_display(GLFWwindow* window)
         glUniformMatrix4fv(glGetUniformLocation(g_geomProgram, "u_model"),
             1, GL_FALSE, glm::value_ptr(model));
 
-        // emissive color stored in Kd
-        glm::vec3 Kd = glm::vec3(50.0f);  // bright white so bloom works
+        glm::vec3 Kd = glm::vec3(50.0f);  
         glm::vec3 Ka = glm::vec3(0.0f);
         glm::vec3 Ks = glm::vec3(0.0f);
-        float Ns = -1.0f;    // negative shininess marks emissive
+        float Ns = -1.0f;    
 
         glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Ka"), 1, glm::value_ptr(Ka));
         glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Kd"), 1, glm::value_ptr(Kd));
@@ -1551,7 +1424,6 @@ static void on_display(GLFWwindow* window)
         glDrawElements(GL_TRIANGLES, g_lightSphereIndexCount, GL_UNSIGNED_INT, 0);
     }
 
-    // NEW: small emissive sphere at volumetric demo light position
     if (g_lightSphereVAO != 0 && g_showVolDemoSphere)
     {
         glm::mat4 model(1.0f);
@@ -1563,10 +1435,10 @@ static void on_display(GLFWwindow* window)
         glUniformMatrix4fv(glGetUniformLocation(g_geomProgram, "u_model"),
             1, GL_FALSE, glm::value_ptr(model));
 
-        glm::vec3 Kd = glm::vec3(40.0f); // bright white "sun"
+        glm::vec3 Kd = glm::vec3(40.0f);
         glm::vec3 Ka = glm::vec3(0.0f);
         glm::vec3 Ks = glm::vec3(0.0f);
-        float Ns = -1.0f; // emissive
+        float Ns = -1.0f; 
 
         glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Ka"), 1, glm::value_ptr(Ka));
         glUniform3fv(glGetUniformLocation(g_geomProgram, "u_Kd"), 1, glm::value_ptr(Kd));
@@ -1582,7 +1454,6 @@ static void on_display(GLFWwindow* window)
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    // 2.5) SSAO pass
     if (g_enableSSAO) {
         glBindFramebuffer(GL_FRAMEBUFFER, g_ssaoFBO);
         glViewport(0, 0, g_ssaoWidth, g_ssaoHeight);
@@ -1591,7 +1462,6 @@ static void on_display(GLFWwindow* window)
 
         glUseProgram(g_ssaoProgram);
 
-        // G-buffer inputs
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, g_gPositionTex);
         glUniform1i(glGetUniformLocation(g_ssaoProgram, "gPosition"), 0);
@@ -1604,7 +1474,6 @@ static void on_display(GLFWwindow* window)
         glBindTexture(GL_TEXTURE_2D, g_ssaoNoiseTex);
         glUniform1i(glGetUniformLocation(g_ssaoProgram, "texNoise"), 2);
 
-        // uniforms
         glm::vec2 noiseScale(
             (float)g_ssaoWidth / 4.0f,
             (float)g_ssaoHeight / 4.0f);
@@ -1617,7 +1486,6 @@ static void on_display(GLFWwindow* window)
         glUniform1f(glGetUniformLocation(g_ssaoProgram, "u_radius"), g_ssaoRadius);
         glUniform1f(glGetUniformLocation(g_ssaoProgram, "u_bias"), g_ssaoBias);
 
-        // kernel samples
         for (int i = 0; i < SSAO_KERNEL_SIZE; ++i) {
             std::string name = "u_samples[" + std::to_string(i) + "]";
             glUniform3fv(glGetUniformLocation(g_ssaoProgram, name.c_str()),
@@ -1649,9 +1517,6 @@ static void on_display(GLFWwindow* window)
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
-
-
-    // 3) Lighting pass -> HDR FBO (scene + bright)
     glBindFramebuffer(GL_FRAMEBUFFER, g_hdrFBO);
     glViewport(0, 0, display_w, display_h);
     glDisable(GL_DEPTH_TEST);
@@ -1659,7 +1524,6 @@ static void on_display(GLFWwindow* window)
 
     glUseProgram(g_lightProgram);
 
-    // Bind G-buffer textures
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, g_gPositionTex);
     glUniform1i(glGetUniformLocation(g_lightProgram, "gPosition"), 0);
@@ -1680,13 +1544,11 @@ static void on_display(GLFWwindow* window)
     glBindTexture(GL_TEXTURE_2D, g_gSpecularTex);
     glUniform1i(glGetUniformLocation(g_lightProgram, "gSpecular"), 4);
 
-    // Shadow cube map
     glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_CUBE_MAP, g_shadowTexA);
     glUniform1i(glGetUniformLocation(g_lightProgram, "u_shadowCube"), 5);
     glUniform1f(glGetUniformLocation(g_lightProgram, "u_far"), g_pointShadowFar);
 
-    // SSAO texture
     glActiveTexture(GL_TEXTURE6);
     glBindTexture(GL_TEXTURE_2D, g_enableSSAO ? g_ssaoBlurTex : 0);
     glUniform1i(glGetUniformLocation(g_lightProgram, "u_ssaoTex"), 6);
@@ -1694,30 +1556,19 @@ static void on_display(GLFWwindow* window)
         g_enableSSAO ? 1 : 0);
 
 
-    // ---- Directional shadow map + light matrices ----
-
-    // Bind shadow map (2D depth)
     glActiveTexture(GL_TEXTURE7);
     glBindTexture(GL_TEXTURE_2D, g_dirShadowTex);
     glUniform1i(glGetUniformLocation(g_lightProgram, "u_dirShadowMap"), 7);
 
-    // Pass light VP (computed in renderDirectionalShadowPass())
     glUniformMatrix4fv(glGetUniformLocation(g_lightProgram, "u_lightVP"),
         1, GL_FALSE, glm::value_ptr(g_dirLightVP));
 
-    // Pass light direction (world space).
-    // Convention: u_lightDir = direction FROM surface TO light
-    // Explanation: (eye -> center) is the direction the light rays travel.
-    // From surface to light is opposite of ray travel, so use (center - eye).
     glm::vec3 lightDir = glm::normalize(g_dirLightEye - g_dirLightCenter);
     //glm::vec3 lightDir = glm::normalize(g_dirLightCenter - g_dirLightEye);
 
     glUniform3fv(glGetUniformLocation(g_lightProgram, "u_lightDir"),
         1, glm::value_ptr(lightDir));
 
-
-
-    // Camera / light uniforms
     glUniform3fv(glGetUniformLocation(g_lightProgram, "u_eye"), 1, glm::value_ptr(g_eye));
 
     glm::vec3 Ia(0.02f, 0.02f, 0.02f);
@@ -1740,13 +1591,11 @@ static void on_display(GLFWwindow* window)
     glUniform1i(glGetUniformLocation(g_lightProgram, "u_enableBloom"), g_enableBloom ? 1 : 0);
     glUniform1f(glGetUniformLocation(g_lightProgram, "u_bloomThreshold"), g_bloomThreshold);
 
-    // View / proj for SSR
     glUniformMatrix4fv(glGetUniformLocation(g_lightProgram, "u_view"),
         1, GL_FALSE, glm::value_ptr(view));
     glUniformMatrix4fv(glGetUniformLocation(g_lightProgram, "u_proj"),
         1, GL_FALSE, glm::value_ptr(proj));
 
-    // SSR params
     glUniform1i(glGetUniformLocation(g_lightProgram, "u_enableSSR"), g_enableSSR ? 1 : 0);
     glUniform1f(glGetUniformLocation(g_lightProgram, "u_ssrMaxDistance"), g_ssrMaxDistance);
     glUniform1i(glGetUniformLocation(g_lightProgram, "u_ssrMaxSteps"), g_ssrMaxSteps);
@@ -1754,7 +1603,6 @@ static void on_display(GLFWwindow* window)
     glUniform1f(glGetUniformLocation(g_lightProgram, "u_ssrThickness"), g_ssrThickness);
     glUniform1f(glGetUniformLocation(g_lightProgram, "u_ssrIntensity"), g_ssrIntensity);
 
-    // ----- area light basis & uniforms (before draw!) -----
     {
         glm::vec3 rectN, rectT, rectB;
         buildAreaLightBasis(rectN, rectT, rectB);
@@ -1782,7 +1630,6 @@ static void on_display(GLFWwindow* window)
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
 
-    // 4) Blur bright texture (gaussian ping-pong)
     bool horizontal = true;
     bool firstIter = true;
     int  iterations = glm::clamp(g_blurIterations, 1, 20);
@@ -1807,7 +1654,6 @@ static void on_display(GLFWwindow* window)
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    // --- 4.5) Volumetric light scattering ("god rays") ---
     glm::vec2 lightScreenPos(-1.0f, -1.0f);
     bool doVol = g_enableVolumetric;
     float edgeFade = 1.0f;
@@ -1818,31 +1664,11 @@ static void on_display(GLFWwindow* window)
     
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    //end
 
-    //slide demo
-    // =======================================================
-    // SCREEN-SPACE GOD RAYS (SLIDES VERSION)
-    // =======================================================
-    // =======================================================
-    // GOD RAYS (Screen-space) — GPU Gems style
-    // Requires:
-    //   - g_occFBO + g_occTex (initOcclusionBuffer)
-    //   - g_volumetricFBO + g_volumetricTex (initVolumetricBuffer)
-    //   - g_colorProgram (simple solid color shader)
-    //   - g_volumetricProgram (radial blur shader)
-    //   - g_quadVAO
-    // =======================================================
     if (g_volMode == VOL_GODRAYS)
     {
-        // Choose which light position drives the shafts
         glm::vec3 lightWorld = g_useDemoVolLight ? g_volDemoLightPos : g_pointLightPos;
 
-        // ---------------------------------------------------
-        // 1) OCCLUSION MASK PASS (downsampled)
-        //    - Render all occluders black
-        //    - Render light as small white blob
-        // ---------------------------------------------------
         glBindFramebuffer(GL_FRAMEBUFFER, g_occFBO);
         glViewport(0, 0, g_occW, g_occH);
         glEnable(GL_DEPTH_TEST);
@@ -1854,7 +1680,6 @@ static void on_display(GLFWwindow* window)
         glUniformMatrix4fv(glGetUniformLocation(g_colorProgram, "u_view"), 1, GL_FALSE, glm::value_ptr(view));
         glUniformMatrix4fv(glGetUniformLocation(g_colorProgram, "u_proj"), 1, GL_FALSE, glm::value_ptr(proj));
 
-        // Draw scene as BLACK (occluders)
         glUniform4f(glGetUniformLocation(g_colorProgram, "u_color"), 0, 0, 0, 1);
 
         glm::mat4 triceModel = getTriceModel();
@@ -1870,7 +1695,6 @@ static void on_display(GLFWwindow* window)
             glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, 0);
         }
 
-        // Draw the light as WHITE (keep it SMALL so you get long shafts)
         glUniform4f(glGetUniformLocation(g_colorProgram, "u_color"), 1, 1, 1, 1);
 
         if (g_lightSphereVAO != 0) {
@@ -1885,12 +1709,8 @@ static void on_display(GLFWwindow* window)
         glBindVertexArray(0);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-        // ---------------------------------------------------
-        // 2) Compute LIGHT SCREEN POS (UV 0..1)
-        // ---------------------------------------------------
         glm::vec4 clip = proj * view * glm::vec4(lightWorld, 1.0f);
 
-        // If behind camera, just clear volumetric and skip
         if (clip.w <= 0.0f) {
             glBindFramebuffer(GL_FRAMEBUFFER, g_volumetricFBO);
             glViewport(0, 0, g_volWidth, g_volHeight);
@@ -1901,19 +1721,14 @@ static void on_display(GLFWwindow* window)
         }
         else
         {
-            glm::vec3 ndc = glm::vec3(clip) / clip.w;          // -1..1
-            glm::vec2 uv = glm::vec2(ndc.x, ndc.y) * 0.5f + 0.5f; // 0..1
+            glm::vec3 ndc = glm::vec3(clip) / clip.w;       
+            glm::vec2 uv = glm::vec2(ndc.x, ndc.y) * 0.5f + 0.5f;
 
-            // Clamp to screen (GPU Gems style still works fine clamped)
             glm::vec2 lightScreenPos = glm::clamp(uv, glm::vec2(0.0f), glm::vec2(1.0f));
 
-            // Optional edge fade (prevents ugly smear when light is off-screen-ish)
             glm::vec2 clamped = lightScreenPos;
             float edgeFade = 1.0f - glm::clamp(glm::length(uv - clamped) * 2.0f, 0.0f, 1.0f);
 
-            // ---------------------------------------------------
-            // 3) RADIAL BLUR PASS -> g_volumetricTex
-            // ---------------------------------------------------
             glBindFramebuffer(GL_FRAMEBUFFER, g_volumetricFBO);
             glViewport(0, 0, g_volWidth, g_volHeight);
             glDisable(GL_DEPTH_TEST);
@@ -1923,14 +1738,12 @@ static void on_display(GLFWwindow* window)
 
             glUseProgram(g_volumetricProgram);
 
-            // Input = occlusion mask
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, g_occTex);
             glUniform1i(glGetUniformLocation(g_volumetricProgram, "u_scene"), 0);
 
             glUniform2fv(glGetUniformLocation(g_volumetricProgram, "u_lightScreenPos"), 1, &lightScreenPos.x);
 
-            // GPU Gems params
             glUniform1i(glGetUniformLocation(g_volumetricProgram, "u_numSamples"), g_volNumSamples);
             glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_exposure"), g_volExposure * edgeFade);
             glUniform1f(glGetUniformLocation(g_volumetricProgram, "u_decay"), g_volDecay);
@@ -1968,9 +1781,6 @@ static void on_display(GLFWwindow* window)
 
         glUseProgram(g_volRaymarchProgram);
 
-        // --------------------------------------------------
-        // Bind POINT LIGHT shadow cubemap for volumetric fog
-        // --------------------------------------------------
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_CUBE_MAP, g_shadowTexB);
         glUniform1i(
@@ -1978,30 +1788,23 @@ static void on_display(GLFWwindow* window)
             1
         );
 
-        // Shadow far plane (must match depth pass)
         glUniform1f(
             glGetUniformLocation(g_volRaymarchProgram, "u_pointShadowFar"),
             g_pointShadowFar
         );
 
-        // Small bias to avoid self-shadowing in fog
         glUniform1f(
             glGetUniformLocation(g_volRaymarchProgram, "u_shadowBias"),
             0.05f
         );
 
-
-
-        // gPosition
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, g_gPositionTex);
         glUniform1i(glGetUniformLocation(g_volRaymarchProgram, "gPosition"), 0);
 
-        // camera
         glUniform3fv(glGetUniformLocation(g_volRaymarchProgram, "u_eye"),
             1, glm::value_ptr(g_eye));
 
-        // volumetric point light = demo sphere
         glm::vec3 volPos = g_volDemoLightPos;
         //renderShadowPass(volPos);
         glUniform3fv(glGetUniformLocation(g_volRaymarchProgram, "u_volLightPos"),
@@ -2013,7 +1816,6 @@ static void on_display(GLFWwindow* window)
         glUniform1f(glGetUniformLocation(g_volRaymarchProgram, "u_volLightIntensity"),
             g_volLightIntensity);
 
-        // fog params
         glUniform1i(glGetUniformLocation(g_volRaymarchProgram, "u_steps"), g_volSteps);
         glUniform1f(glGetUniformLocation(g_volRaymarchProgram, "u_maxDistance"), g_volMaxDistance);
         glUniform1f(glGetUniformLocation(g_volRaymarchProgram, "u_baseDensity"), g_volBaseDensity);
@@ -2041,8 +1843,6 @@ static void on_display(GLFWwindow* window)
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }*/
 
-
-    // 5) Final combine: HDR scene + blurred bloom -> default framebuffer
     glViewport(0, 0, display_w, display_h);
 
     glClearColor(g_clearColor.x * g_clearColor.w,
@@ -2062,7 +1862,6 @@ static void on_display(GLFWwindow* window)
     glBindTexture(GL_TEXTURE_2D, blurredTex);
     glUniform1i(glGetUniformLocation(g_finalProgram, "u_bloomBlur"), 1);
 
-    // Volumetric texture (may be empty if disabled/off-screen)
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, g_volumetricTex);
     glUniform1i(glGetUniformLocation(g_finalProgram, "u_volumetric"), 2);
@@ -2092,9 +1891,6 @@ static void on_display(GLFWwindow* window)
     glUseProgram(0);
 }
 
-// ==============================
-// ImGui UI
-// ==============================
 static void on_gui()
 {
     ImGui::Begin("Control Panel");
@@ -2248,9 +2044,6 @@ static void on_gui()
     ImGui::End();
 }
 
-// ==============================
-// Input callbacks
-// ==============================
 static void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
 {
     if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
@@ -2373,9 +2166,6 @@ static GLuint createProgramFromFiles(const std::string& vsPath, const std::strin
     return prog;
 }
 
-// ==============================
-// main()
-// ==============================
 int main(int, char**)
 {
     glfwSetErrorCallback(glfw_error_callback);
@@ -2400,14 +2190,12 @@ int main(int, char**)
         std::cerr << "Failed to initialize GLAD\n";
         return -1;
     }
-    glfwSwapInterval(1); // vsync
+    glfwSwapInterval(1); 
 
-    // Callbacks
     glfwSetKeyCallback(window, key_callback);
     glfwSetMouseButtonCallback(window, mouse_button_callback);
     glfwSetCursorPosCallback(window, cursor_pos_callback);
 
-    // ImGui init
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
@@ -2422,7 +2210,6 @@ int main(int, char**)
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
-    // Our GL resources
     g_geomProgram = createProgramFromFiles("./shaders/geom.vert", "./shaders/geom.frag");
     g_lightProgram = createProgramFromFiles("./shaders/quad.vert", "./shaders/light.frag");
     g_blurProgram = createProgramFromFiles("./shaders/quad.vert", "./shaders/blur.frag");
@@ -2434,7 +2221,6 @@ int main(int, char**)
     g_volumetricProgram = createProgramFromFiles("./shaders/quad.vert", "./shaders/volumetric.frag");
     g_volRaymarchProgram = createProgramFromFiles("./shaders/quad.vert", "./shaders/volumetric_raymarch.frag");
     g_colorProgram = createProgramFromFiles("./shaders/color.vert", "./shaders/color.frag");
-
 
     initSSAOKernelAndNoise();
     initShadowMap();
@@ -2452,14 +2238,12 @@ int main(int, char**)
     initGBuffer(fbw, fbh);
     initOcclusionBuffer(fbw, fbh);
 
-    // Load models
     loadOBJScene("./assets/indoor_model/Grey_White_Room.obj", glm::mat4(1.0f));
-    g_triceFirstMesh = g_meshes.size(); // triceratops starts here
+    g_triceFirstMesh = g_meshes.size();
     loadOBJScene("./assets/indoor_model/trice.obj", glm::mat4(1.0f));
 
     g_triceNormalTex = loadTexture2D("./assets/indoor_model/tricnorm.jpg");
 
-    // Main loop
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
@@ -2481,7 +2265,6 @@ int main(int, char**)
         glfwSwapBuffers(window);
     }
 
-    // Cleanup
     for (auto& m : g_meshes) {
         if (m.diffuseTex) glDeleteTextures(1, &m.diffuseTex);
         if (m.ebo)        glDeleteBuffers(1, &m.ebo);
