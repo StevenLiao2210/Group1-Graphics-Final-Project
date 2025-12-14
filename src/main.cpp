@@ -2164,22 +2164,22 @@ static void on_gui()
     /*ImGui::Separator();
     ImGui::Text("Volumetric");*/
 
-    const char* volModes[] = {
+    /*const char* volModes[] = {
         "Off",
         "God Rays (Screen-space)",
         "True Fog (Raymarch)"
     };
-    ImGui::Combo("Volumetric Mode", &g_volMode, volModes, 3);
+    ImGui::Combo("Volumetric Mode", &g_volMode, volModes, 3);*/
 
-    if (g_volMode == VOL_GODRAYS) {
+    /*if (g_volMode == VOL_GODRAYS) {
         ImGui::SliderFloat("Exposure", &g_volExposure, 0.0f, 1.0f);
         ImGui::SliderFloat("Density", &g_volDensity, 0.0f, 2.0f);
         ImGui::SliderFloat("Decay", &g_volDecay, 0.8f, 1.0f);
-    }
+    }*/
 
     if (g_volMode == VOL_FOG) {
         ImGui::SliderFloat("Fog Density", &g_volBaseDensity, 0.0f, 0.2f);
-        ImGui::SliderFloat("Light Intensity", &g_volLightIntensity, 0.0f, 50.0f);
+        //ImGui::SliderFloat("Light Intensity", &g_volLightIntensity, 0.0f, 50.0f);
     }
 
 
