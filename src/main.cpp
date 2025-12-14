@@ -84,7 +84,7 @@ GLuint g_shadowTex = 0;
 const int SHADOW_MAP_SIZE = 1024;
 
 const float g_pointShadowNear = 0.22f;
-const float g_pointShadowFar = 18.0f;
+const float g_pointShadowFar = 20.0f;
 
 glm::mat4 g_pointShadowMatrices[6];
 
