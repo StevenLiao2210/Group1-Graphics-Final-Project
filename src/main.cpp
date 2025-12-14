@@ -34,12 +34,12 @@ float g_fov = 45.0f;
 bool g_mouseRot = false;
 double g_lastX = 0.0, g_lastY = 0.0;
 
-GLuint g_geomProgram = 0; // geometry (G-buffer) pass
-GLuint g_lightProgram = 0; // lighting pass
-GLuint g_depthProgram = 0; // shadow-map depth pass
-GLuint g_blurProgram = 0; // gaussian blur for bloom
-GLuint g_finalProgram = 0; // final combine pass
-GLuint g_volRaymarchProgram = 0; //volumetric lighting
+GLuint g_geomProgram = 0; 
+GLuint g_lightProgram = 0; 
+GLuint g_depthProgram = 0; 
+GLuint g_blurProgram = 0; 
+GLuint g_finalProgram = 0; 
+GLuint g_volRaymarchProgram = 0; 
 
 GLuint g_dirShadowFBO = 0;
 GLuint g_dirShadowTex = 0;
@@ -81,8 +81,8 @@ float g_lightFar = 10.0f;
 float g_lightRange = 5.0f; 
 
 
-GLuint g_shadowTexA = 0; // point light
-GLuint g_shadowTexB = 0; // demo light (or 2nd point light)
+GLuint g_shadowTexA = 0; 
+GLuint g_shadowTexB = 0; 
 
 GLuint g_lightSphereVAO = 0;
 GLuint g_lightSphereVBO = 0;
@@ -96,7 +96,7 @@ GLuint g_areaRectVBO = 0;
 GLuint g_areaRectEBO = 0;
 GLsizei g_areaRectIndexCount = 0;
 
-float g_shadowStrength = 0.0f;  // 0 = fully black shadow, 1 = no shadow dimming
+float g_shadowStrength = 0.0f;  
 bool g_enableShadows = true;
 
 glm::vec3 g_tricePos = glm::vec3(2.05f, 0.628725f, -1.9f);
@@ -168,22 +168,22 @@ struct Mesh {
     GLuint ebo = 0;
     GLsizei indexCount = 0;
 
-    GLuint diffuseTex = 0;             // map_Kd
-    glm::vec3 Ka = glm::vec3(0.1f);       // ambient
-    glm::vec3 Kd = glm::vec3(5.0f);       // diffuse
-    glm::vec3 Ks = glm::vec3(0.0f);       // specular
-    float Ns = 32.0f;                 // shininess
+    GLuint diffuseTex = 0;         
+    glm::vec3 Ka = glm::vec3(0.1f);       
+    glm::vec3 Kd = glm::vec3(5.0f);       
+    glm::vec3 Ks = glm::vec3(0.0f);       
+    float Ns = 32.0f;                
 
-    glm::mat4 model = glm::mat4(1.0f);    // base model (room uses this; trice overridden at draw)
+    glm::mat4 model = glm::mat4(1.0f);    
 };
 
 std::vector<Mesh> g_meshes;
 
-glm::vec3 g_areaCenter = glm::vec3(1.0f, 0.5f, -0.5f); // given
-glm::vec2 g_areaSize = glm::vec2(1.0f, 1.0f);        // width, height
-glm::vec3 g_areaEuler = glm::vec3(180.0f, 0.0f, 0.0f);  // pitch, yaw, roll in deg
-glm::vec3 g_areaColor = glm::vec3(0.8f, 0.6f, 0.0f);  // given color
-int g_areaSamples = 16;                          // 4x4 stratified samples
+glm::vec3 g_areaCenter = glm::vec3(1.0f, 0.5f, -0.5f); 
+glm::vec2 g_areaSize = glm::vec2(1.0f, 1.0f);        
+glm::vec3 g_areaEuler = glm::vec3(180.0f, 0.0f, 0.0f);  
+glm::vec3 g_areaColor = glm::vec3(0.8f, 0.6f, 0.0f);  
+int g_areaSamples = 16;                          
 bool g_enableAreaLight = true;
 
 GLuint g_volumetricFBO = 0;
@@ -195,13 +195,13 @@ GLuint g_volumetricProgram = 0;
 bool g_enableVolumetric = false;
 int g_volNumSamples = 100;     
 float g_volExposure = 0.2f;     
-float g_volDecay = 0.96815f; // decay
-float g_volDensity = 0.926f;   // density
-float g_volWeight = 0.58767f; // weight
-float g_volIntensity = 1.0f;     // how strong in final image
+float g_volDecay = 0.96815f; 
+float g_volDensity = 0.926f; 
+float g_volWeight = 0.58767f;
+float g_volIntensity = 1.0f;     
 
-float g_volThreshold = 0.7f;   // brightness threshold
-float g_volSourceRadius = 0.05f;  // on-screen radius around light
+float g_volThreshold = 0.7f;   
+float g_volSourceRadius = 0.05f; 
 
 bool g_useDemoVolLight = true;
 glm::vec3 g_volDemoLightPos(
@@ -215,22 +215,22 @@ bool  g_enableToon = true;
 int   g_toonSteps = 3;   
 bool  g_enableEdges = true;
 
-float g_edgeDepthThreshold = 0.10f; // tune
-float g_edgeNormalThreshold = 1.0f; // tune
-float g_edgeStrength = 1.0f;         // 0..1
+float g_edgeDepthThreshold = 0.10f; 
+float g_edgeNormalThreshold = 1.0f; 
+float g_edgeStrength = 1.0f;       
 
 bool  g_enableVolFog = true;
 
 int   g_volSteps = 256;
 float g_volMaxDistance = 50.0f;
 
-float g_volBaseDensity = 0.03f;   // main fog density
-float g_volHeightFalloff = 1.0f; // height fog strength
+float g_volBaseDensity = 0.03f;  
+float g_volHeightFalloff = 1.0f; 
 
-float g_volAnisotropy = -0.2f;     // forward scattering (0 = isotropic)
-float g_volExtinction = 1.0f;     // absorption + scattering
+float g_volAnisotropy = -0.2f;     
+float g_volExtinction = 1.0f;     
 
-float g_volLightIntensity = 8.0f; // volumetric light strength
+float g_volLightIntensity = 8.0f; 
 
 enum VolumetricMode {
     VOL_OFF = 0,
@@ -245,7 +245,7 @@ GLuint g_occTex = 0;
 GLuint g_occDepth = 0;
 int g_occW = 0, g_occH = 0;
 
-GLuint g_colorProgram = 0; // simple shader: output uniform color
+GLuint g_colorProgram = 0; 
 
 static void initOcclusionBuffer(int w, int h) {
     w = std::max(1, w / 2);
@@ -380,7 +380,6 @@ static GLuint loadTexture2D(const std::string& path)
     glTexImage2D(GL_TEXTURE_2D, 0, internalFormat,
         w, h, 0, format, GL_UNSIGNED_BYTE, data);
 
-    // grayscale swizzle
     if (n == 1) {
         GLint swizzleMask[] = { GL_RED, GL_RED, GL_RED, GL_ONE };
         glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swizzleMask);
@@ -478,13 +477,11 @@ static void loadOBJScene(const std::string& objPath, const glm::mat4& modelMatri
     const auto& shapes = reader.GetShapes();
     const auto& materials = reader.GetMaterials();
 
-    // base directory for MTL + textures
     size_t slashPos = objPath.find_last_of("/\\");
     std::string baseDir = (slashPos == std::string::npos)
         ? std::string()
         : objPath.substr(0, slashPos + 1);
 
-    // preload materials: Ka/Kd/Ks/Ns + textures
     std::vector<GLuint>    matTexID(materials.size(), 0);
     std::vector<glm::vec3> matKa(materials.size(), glm::vec3(0.1f));
     std::vector<glm::vec3> matKd(materials.size(), glm::vec3(1.0f));
@@ -541,7 +538,6 @@ static void loadOBJScene(const std::string& objPath, const glm::mat4& modelMatri
             const auto& idx = shape.mesh.indices[i];
             Vertex v{};
 
-            // position
             if (idx.vertex_index >= 0) {
                 v.pos = glm::vec3(
                     attrib.vertices[3 * idx.vertex_index + 0],
@@ -553,7 +549,6 @@ static void loadOBJScene(const std::string& objPath, const glm::mat4& modelMatri
                 v.pos = glm::vec3(0.0f);
             }
 
-            // normal
             if (idx.normal_index >= 0) {
                 v.norm = glm::vec3(
                     attrib.normals[3 * idx.normal_index + 0],
@@ -565,7 +560,6 @@ static void loadOBJScene(const std::string& objPath, const glm::mat4& modelMatri
                 v.norm = glm::vec3(0, 1, 0);
             }
 
-            // texcoord
             if (idx.texcoord_index >= 0) {
                 v.uv = glm::vec2(
                     attrib.texcoords[2 * idx.texcoord_index + 0],
@@ -675,7 +669,6 @@ static void initBloomBuffers(int width, int height)
     g_bloomWidth = width;
     g_bloomHeight = height;
 
-    // Delete old
     if (g_hdrColorTex)   glDeleteTextures(1, &g_hdrColorTex);
     if (g_brightColorTex) glDeleteTextures(1, &g_brightColorTex);
     if (g_hdrFBO)        glDeleteFramebuffers(1, &g_hdrFBO);
@@ -1327,7 +1320,6 @@ static void on_display(GLFWwindow* window)
         bool isTrice = (g_triceFirstMesh != (size_t)-1 && i >= g_triceFirstMesh);
         glm::mat4 model = isTrice ? triceModel : mesh.model;
 
-        // For trice: enable normal map if checkbox is on and texture is valid
         bool useNormalMap = isTrice && g_enableNormalMap && (g_triceNormalTex != 0);
         glUniform1i(glGetUniformLocation(g_geomProgram, "u_useNormalMap"),
             useNormalMap ? 1 : 0);
@@ -1338,7 +1330,6 @@ static void on_display(GLFWwindow* window)
             glUniform1i(glGetUniformLocation(g_geomProgram, "u_normalMap"), 1);
         }
         else {
-            // No normal map for this mesh
             glActiveTexture(GL_TEXTURE1);
             glBindTexture(GL_TEXTURE_2D, 0);
         }
@@ -1661,8 +1652,6 @@ static void on_display(GLFWwindow* window)
     glm::vec3 volLightPos = g_useDemoVolLight ? g_volDemoLightPos : lightPos;
 
 
-    
-
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     if (g_volMode == VOL_GODRAYS)
@@ -1881,9 +1870,6 @@ static void on_display(GLFWwindow* window)
     glUniform1f(glGetUniformLocation(g_finalProgram, "u_exposure"),
         g_exposure);
 
-
-
-
     glBindVertexArray(g_quadVAO);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
@@ -1997,7 +1983,6 @@ static void on_gui()
     ImGui::SliderFloat("Extinction", &g_volExtinction, 0.1f, 5.0f);*/
 
 
-    // NEW: demo sun light
     //ImGui::Separator();
     //ImGui::Text("Volumetric Demo Light");
     //ImGui::Checkbox("Use demo light pos", &g_useDemoVolLight);
